@@ -1,0 +1,31 @@
+# Codex / test temp
+codex-*/
+**/codex-*/
+.pytest-tmp/
+.pytest-tmp-local/
+.pytest_cache/
+**/__pycache__/
+*.pyc
+
+# caches
+cache/
+**/cache/
+
+# Unity generated
+gs-vr-nav-unity/Library/
+gs-vr-nav-unity/Logs/
+gs-vr-nav-unity/UserSettings/
+*.log
+
+# nested external repo
+external/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+
+work/
+tools/

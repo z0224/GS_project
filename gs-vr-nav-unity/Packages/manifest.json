@@ -1,0 +1,13 @@
+{
+  "dependencies": {
+    "com.coplaydev.unity-mcp": "https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#main",
+    "com.unity.inputsystem": "1.14.2",
+    "com.unity.nuget.newtonsoft-json": "3.2.1",
+    "com.unity.render-pipelines.universal": "17.2.0",
+    "com.unity.ugui": "2.0.0",
+    "com.unity.xr.interaction.toolkit": "3.2.2",
+    "com.unity.xr.management": "4.5.1",
+    "org.nesnausk.gaussian-splatting": "https://github.com/aras-p/UnityGaussianSplatting.git?path=package",
+    "com.unity.modules.imageconversion": "1.0.0"
+  }
+}

@@ -1,0 +1,19 @@
+capture:
+  image_extensions: [".jpg", ".jpeg", ".png"]
+  min_gps_accuracy_m: 10.0
+
+reconstruction:
+  sh_degree: 3
+  iterations: 30000
+
+geo_alignment:
+  osm_radius_m: 500
+  road_buffer_m: 3.0
+  sidewalk_buffer_m: 2.0
+
+navigation:
+  walk_speed_ms: 1.4
+  collision_margin_m: 0.3
+
+vr:
+  target_fps: 72
