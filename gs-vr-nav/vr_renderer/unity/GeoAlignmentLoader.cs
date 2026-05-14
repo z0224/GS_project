@@ -1,220 +1,144 @@
-// 加载 Python 管线导出的 nav mesh JSON，提供高性能 2D 空间查询。
-// 同时在 Scene 视图中提供可视化调试。
-//
-// Unity 项目配置要点：
-// - Project Settings > XR Plug-in Management 中不要勾选 Oculus 或 OpenXR；MVP 只使用 XR Device Simulator。
-// - Project Settings > Player > Active Input Handling 设为 "Both" 或 "Input System Package (New)"。
-// - 构建平台保持默认 Standalone (PC)，不需要切换到 Android。
-//
-// 坐标系映射表（JSON 坐标为 ENU East/North，对应 Unity x/z）：
-// ┌──────────────────────────────────────────────────────┐
-// │ Python ENU: X = East, Y = North, Z = Up（右手系）     │
-// │ Unity:      X = Right, Y = Up,    Z = Forward（左手系）│
-// ├────────────┬──────────┬──────────┬──────────────────┤
-// │            │  East    │  North   │  Up              │
-// ├────────────┼──────────┼──────────┼──────────────────┤
-// │ ENU        │  X (+)   │  Y (+)   │  Z (+)           │
-// │ Unity      │  X (+)   │  Z (+)   │  Y (+)           │
-// ├────────────┴──────────┴──────────┴──────────────────┤
-// │ ENU(e, n, u) → Unity(e, u, n)                        │
-// │ Unity(x, y, z) = (ENU.east, ENU.up, ENU.north)        │
-// └──────────────────────────────────────────────────────┘
-
 using System;
 using System.Collections.Generic;
 using System.IO;
-using Newtonsoft.Json.Linq;
 using UnityEngine;
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
 
 namespace GsVrNav.Unity
 {
     /// <summary>
-    /// Loads a Python-exported ENU navigation mesh and answers Unity XZ-plane walkability queries.
+    /// Loads Blosm-exported map geometry and uses it as the authoritative navigation/collision source.
     /// </summary>
     public sealed class GeoAlignmentLoader : MonoBehaviour
     {
-        /// <summary>
-        /// Serializable 2D polygon with an outer boundary and optional holes.
-        /// </summary>
-        [Serializable]
-        public class Polygon2D
-        {
-            /// <summary>
-            /// Exterior ring in ENU (East, North), mapped to Unity (x, z).
-            /// </summary>
-            public Vector2[] outerRing = Array.Empty<Vector2>();
-
-            /// <summary>
-            /// Interior rings in ENU (East, North), mapped to Unity (x, z).
-            /// </summary>
-            public Vector2[][] holes = Array.Empty<Vector2[]>();
-        }
-
-        [Header("NavMesh Source")]
-        [SerializeField]
-        private string navMeshJsonPath = "nav_mesh.json";
-
-        [SerializeField]
-        private float gridCellSize = 5.0f;
-
+        [Header("Blosm Map Geometry")]
         [SerializeField]
         private bool loadOnAwake = true;
 
-        [Header("Debug Visualization")]
         [SerializeField]
-        private bool drawWalkableArea = true;
-
-        [SerializeField]
-        private bool drawObstacles = true;
+        private bool showBlosmMapGeometryOnLoad = false;
 
         [SerializeField]
-        private Color walkableColor = new Color(0, 1, 0, 0.3f);
+        private string blosmMapAssetPath = "Assets/External/BlosmMap/Blosm_Map.fbx";
 
         [SerializeField]
-        private Color obstacleColor = new Color(1, 0, 0, 0.5f);
+        private string blosmGeneratorWorkingDirectory = "../gs-vr-nav";
 
-        private readonly List<Polygon2D> walkablePolygons = new List<Polygon2D>();
-        private readonly List<Polygon2D> obstaclePolygons = new List<Polygon2D>();
-        private Vector4 bounds; // (minE, minN, maxE, maxN)
-        private Dictionary<(int, int), List<int>> gridIndex = new Dictionary<(int, int), List<int>>();
-        private Dictionary<(int, int), List<int>> obstacleGridIndex = new Dictionary<(int, int), List<int>>();
+        [SerializeField]
+        private string blosmTransformsJsonPath = "transforms.json";
 
-        /// <summary>
-        /// Gets the loaded walkable polygons in ENU East/North coordinates.
-        /// </summary>
-        public IReadOnlyList<Polygon2D> WalkablePolygons => walkablePolygons;
+        [SerializeField]
+        private string blosmPythonExecutable = "python";
 
-        /// <summary>
-        /// Gets the loaded obstacle polygons in ENU East/North coordinates.
-        /// </summary>
-        public IReadOnlyList<Polygon2D> ObstaclePolygons => obstaclePolygons;
+        [SerializeField]
+        private string blenderExecutablePath = "";
 
-        /// <summary>
-        /// Gets the navigation bounds as (minEast, minNorth, maxEast, maxNorth).
-        /// </summary>
-        public Vector4 Bounds => bounds;
+        [Header("Map Alignment")]
+        [SerializeField]
+        private bool applyMapAlignmentOnAwake = true;
+
+        [SerializeField]
+        private string mapAlignmentJsonPath = "Alignment/map_alignment.json";
+
+        [SerializeField]
+        private float defaultMapYOffset = -1f;
+
+        [Header("Blosm Navigation")]
+        [SerializeField]
+        private float walkableRaycastHeight = 20f;
+
+        [SerializeField]
+        private float walkableRaycastDistance = 60f;
+
+        [SerializeField]
+        private float safePointSearchRadius = 6f;
+
+        [SerializeField]
+        private float safePointSearchStep = 0.5f;
+
+        private const string BlosmMapGeometryRootName = "Blosm_MapGeometry";
+
+        private static readonly string[] WalkableKeywords =
+        {
+            "road", "roads", "path", "paths", "footway", "pedestrian", "sidewalk", "street"
+        };
+
+        private static readonly string[] BuildingKeywords =
+        {
+            "building", "buildings"
+        };
+
+        private readonly List<MeshCollider> walkableColliders = new List<MeshCollider>();
+        private readonly List<MeshCollider> buildingColliders = new List<MeshCollider>();
+        private bool blosmGeometryReady;
+
+        public bool BlosmGeometryReady => blosmGeometryReady;
 
         private void Awake()
         {
-            if (!loadOnAwake)
+            if (loadOnAwake)
             {
-                return;
-            }
-
-            string resolvedPath = ResolveJsonPath(navMeshJsonPath);
-            if (File.Exists(resolvedPath))
-            {
-                LoadNavMesh(resolvedPath);
-            }
-            else
-            {
-                Debug.LogWarning($"NavMesh JSON not found at {resolvedPath}. Use the context menu after placing nav_mesh.json in StreamingAssets.");
+                AttachBlosmColliders();
             }
         }
 
-        /// <summary>
-        /// Loads a nav mesh JSON file from an absolute path or from StreamingAssets.
-        /// </summary>
-        /// <param name="jsonPath">Absolute path or file name relative to Application.streamingAssetsPath.</param>
-        public void LoadNavMesh(string jsonPath)
-        {
-            string resolvedPath = ResolveJsonPath(jsonPath);
-            string json = File.ReadAllText(resolvedPath);
-            JObject root = JObject.Parse(json);
-
-            walkablePolygons.Clear();
-            obstaclePolygons.Clear();
-
-            walkablePolygons.AddRange(ParseMultiPolygon(root["walkable_area"]));
-            obstaclePolygons.AddRange(ParseMultiPolygon(root["obstacle_area"]));
-            bounds = ParseBounds(root["bounds"]);
-
-            gridIndex = BuildGridIndex(walkablePolygons);
-            obstacleGridIndex = BuildGridIndex(obstaclePolygons);
-
-            Debug.Log($"NavMesh loaded: {walkablePolygons.Count} walkable polygons, {obstaclePolygons.Count} obstacles, bounds: {bounds}");
-        }
-
-        /// <summary>
-        /// Returns true if a Unity XZ point is inside a walkable polygon and outside all obstacle polygons.
-        /// </summary>
-        /// <param name="x">Unity X coordinate, equivalent to ENU East.</param>
-        /// <param name="z">Unity Z coordinate, equivalent to ENU North.</param>
-        /// <returns>True when the point is navigable.</returns>
         public bool IsWalkable(float x, float z)
         {
-            Vector2 point = new Vector2(x, z);
-            if (!IsInsideBounds(point))
-            {
-                return false;
-            }
-
-            bool insideWalkable = false;
-            foreach (int polygonIndex in QueryCandidatePolygons(point, gridIndex, walkablePolygons))
-            {
-                if (PointInPolygon(point, walkablePolygons[polygonIndex]))
-                {
-                    insideWalkable = true;
-                    break;
-                }
-            }
-
-            if (!insideWalkable)
-            {
-                return false;
-            }
-
-            foreach (int polygonIndex in QueryCandidatePolygons(point, obstacleGridIndex, obstaclePolygons))
-            {
-                if (PointInPolygon(point, obstaclePolygons[polygonIndex]))
-                {
-                    return false;
-                }
-            }
-
-            return true;
+            return TryFindWalkableSurface(new Vector2(x, z), out _);
         }
 
-        /// <summary>
-        /// Finds the nearest point on any walkable polygon boundary for a Unity XZ point.
-        /// </summary>
-        /// <param name="x">Unity X coordinate, equivalent to ENU East.</param>
-        /// <param name="z">Unity Z coordinate, equivalent to ENU North.</param>
-        /// <returns>The nearest Unity XZ point represented as (x, z).</returns>
         public Vector2 ClampToWalkable(float x, float z)
         {
-            Vector2 point = new Vector2(x, z);
-            if (IsWalkable(x, z))
-            {
-                return point;
-            }
-
-            float bestDistanceSq = float.PositiveInfinity;
-            Vector2 bestPoint = point;
-
-            foreach (Polygon2D polygon in walkablePolygons)
-            {
-                FindNearestPointOnRing(point, polygon.outerRing, ref bestPoint, ref bestDistanceSq);
-                if (polygon.holes == null)
-                {
-                    continue;
-                }
-
-                foreach (Vector2[] hole in polygon.holes)
-                {
-                    FindNearestPointOnRing(point, hole, ref bestPoint, ref bestDistanceSq);
-                }
-            }
-
-            return bestPoint;
+            return FindSafeWalkablePoint(x, z);
         }
 
-        /// <summary>
-        /// Clamps a movement segment to the last walkable point along the attempted direction.
-        /// </summary>
-        /// <param name="from">Current Unity XZ position as (x, z).</param>
-        /// <param name="to">Proposed Unity XZ position as (x, z).</param>
-        /// <returns>The final allowed Unity XZ position as (x, z).</returns>
+        public Vector2 FindSafeWalkablePoint(float x, float z, float inwardDistance = 0.25f, float searchRadius = 2.0f)
+        {
+            Vector2 point = new Vector2(x, z);
+            if (TryFindWalkableSurface(point, out Vector3 hitPoint))
+            {
+                return new Vector2(hitPoint.x, hitPoint.z);
+            }
+
+            float maxRadius = Mathf.Max(searchRadius, safePointSearchRadius, inwardDistance);
+            float step = Mathf.Max(0.1f, safePointSearchStep);
+            float bestDistanceSq = float.PositiveInfinity;
+            Vector2 bestPoint = point;
+            bool found = false;
+
+            for (float radius = step; radius <= maxRadius + 0.001f; radius += step)
+            {
+                int samples = Mathf.Max(12, Mathf.CeilToInt(radius * 12f));
+                for (int i = 0; i < samples; i++)
+                {
+                    float angle = Mathf.PI * 2f * i / samples;
+                    Vector2 candidate = point + new Vector2(Mathf.Cos(angle), Mathf.Sin(angle)) * radius;
+                    if (!TryFindWalkableSurface(candidate, out Vector3 candidateHit))
+                    {
+                        continue;
+                    }
+
+                    Vector2 candidate2D = new Vector2(candidateHit.x, candidateHit.z);
+                    float distanceSq = (candidate2D - point).sqrMagnitude;
+                    if (distanceSq < bestDistanceSq)
+                    {
+                        bestDistanceSq = distanceSq;
+                        bestPoint = candidate2D;
+                        found = true;
+                    }
+                }
+
+                if (found)
+                {
+                    return bestPoint;
+                }
+            }
+
+            return point;
+        }
+
         public Vector2 ClampMovement(Vector2 from, Vector2 to)
         {
             if (IsWalkable(to.x, to.y))
@@ -224,16 +148,14 @@ namespace GsVrNav.Unity
 
             if (!IsWalkable(from.x, from.y))
             {
-                return ClampToWalkable(to.x, to.y);
+                return FindSafeWalkablePoint(to.x, to.y);
             }
 
             Vector2 low = from;
             Vector2 high = to;
-
-            // 二分搜索 from→to，保留最后一个仍处于可行走区域内的位置。
-            for (int i = 0; i < 10; i++)
+            for (int i = 0; i < 8; i++)
             {
-                Vector2 mid = (low + high) * 0.5f;
+                Vector2 mid = Vector2.Lerp(low, high, 0.5f);
                 if (IsWalkable(mid.x, mid.y))
                 {
                     low = mid;
@@ -247,312 +169,290 @@ namespace GsVrNav.Unity
             return low;
         }
 
-        /// <summary>
-        /// Generates invisible MeshCollider objects from obstacle polygons.
-        /// </summary>
-        public void GenerateColliders()
+        [ContextMenu("Generate Blosm Map Asset")]
+        public void GenerateBlosmMapAsset()
         {
-            const float colliderHeight = 10f;
-            Transform existingRoot = transform.Find("GeneratedObstacleColliders");
-            if (existingRoot != null)
+#if UNITY_EDITOR
+            string workingDirectory = ResolveProjectRelativePath(blosmGeneratorWorkingDirectory);
+            string outputPath = ResolveProjectRelativePath(blosmMapAssetPath);
+            Directory.CreateDirectory(Path.GetDirectoryName(outputPath));
+
+            List<string> arguments = new List<string>
             {
-                DestroyUnityObject(existingRoot.gameObject);
+                "-m",
+                "geo_alignment.generate_blosm_map",
+                "--transforms-json",
+                blosmTransformsJsonPath,
+                "--output",
+                outputPath
+            };
+
+            if (!string.IsNullOrWhiteSpace(blenderExecutablePath))
+            {
+                arguments.Add("--blender-exe");
+                arguments.Add(blenderExecutablePath);
             }
 
-            GameObject root = new GameObject("GeneratedObstacleColliders");
+            System.Diagnostics.ProcessStartInfo startInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = string.IsNullOrWhiteSpace(blosmPythonExecutable) ? "python" : blosmPythonExecutable,
+                Arguments = JoinCommandLineArguments(arguments),
+                WorkingDirectory = workingDirectory,
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true
+            };
+
+            using (System.Diagnostics.Process process = System.Diagnostics.Process.Start(startInfo))
+            {
+                string stdout = process.StandardOutput.ReadToEnd();
+                string stderr = process.StandardError.ReadToEnd();
+                process.WaitForExit();
+
+                if (process.ExitCode != 0)
+                {
+                    Debug.LogError($"Blosm map asset generation failed.\nCommand: {startInfo.FileName} {startInfo.Arguments}\n{stdout}\n{stderr}");
+                    return;
+                }
+
+                Debug.Log($"Blosm map asset generated at {outputPath}\n{stdout}");
+            }
+
+            AssetDatabase.Refresh();
+            AssetDatabase.ImportAsset(ProjectAbsolutePathToAssetPath(outputPath), ImportAssetOptions.ForceUpdate);
+#else
+            Debug.LogWarning("Generate Blosm Map Asset is only available in the Unity Editor.");
+#endif
+        }
+
+        [ContextMenu("Attach Blosm Colliders")]
+        public void AttachBlosmColliders()
+        {
+            ClearBlosmRuntimeGeometry();
+            walkableColliders.Clear();
+            buildingColliders.Clear();
+            blosmGeometryReady = false;
+
+            GameObject blosmPrefab = LoadBlosmMapPrefab();
+            if (blosmPrefab == null)
+            {
+                Debug.LogError($"Blosm map asset is required but was not found at {blosmMapAssetPath}. Run 'Generate Blosm Map Asset' first.");
+                return;
+            }
+
+            GameObject root = new GameObject(BlosmMapGeometryRootName);
             root.transform.SetParent(transform, false);
+            ApplyMapAlignmentIfAvailable(root.transform);
 
-            for (int i = 0; i < obstaclePolygons.Count; i++)
+            GameObject instance = Instantiate(blosmPrefab, root.transform);
+            instance.name = Path.GetFileNameWithoutExtension(blosmMapAssetPath);
+            instance.transform.localPosition = Vector3.zero;
+            instance.transform.localRotation = Quaternion.identity;
+            instance.transform.localScale = Vector3.one;
+
+            AttachAndClassifyMeshColliders(instance.transform);
+            SetRenderersVisible(root.transform, showBlosmMapGeometryOnLoad);
+
+            if (walkableColliders.Count == 0)
             {
-                Polygon2D polygon = obstaclePolygons[i];
-                if (polygon.outerRing == null || polygon.outerRing.Length < 3)
+                Debug.LogError("Blosm map geometry loaded, but no road/path walkable meshes were detected. Check Blosm object names or export script prefixes.");
+                return;
+            }
+
+            blosmGeometryReady = true;
+            Debug.Log($"Blosm map geometry ready: {walkableColliders.Count} walkable colliders, {buildingColliders.Count} building colliders.");
+        }
+
+        private void ApplyMapAlignmentIfAvailable(Transform root)
+        {
+            if (!applyMapAlignmentOnAwake)
+            {
+                return;
+            }
+
+            string alignmentPath = ResolveStreamingAssetsPath(mapAlignmentJsonPath);
+            if (!File.Exists(alignmentPath))
+            {
+                Debug.LogWarning($"Map alignment JSON was not found at {alignmentPath}; Blosm map geometry will use identity alignment.");
+                root.localPosition = Vector3.zero;
+                root.localRotation = Quaternion.identity;
+                root.localScale = Vector3.one;
+                return;
+            }
+
+            MapAlignmentJson alignment;
+            try
+            {
+                alignment = JsonUtility.FromJson<MapAlignmentJson>(File.ReadAllText(alignmentPath));
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning($"Failed to read map alignment JSON at {alignmentPath}: {exception.Message}. Blosm map geometry will use identity alignment.");
+                root.localPosition = Vector3.zero;
+                root.localRotation = Quaternion.identity;
+                root.localScale = Vector3.one;
+                return;
+            }
+
+            if (alignment == null)
+            {
+                Debug.LogWarning($"Map alignment JSON at {alignmentPath} was empty; Blosm map geometry will use identity alignment.");
+                root.localPosition = Vector3.zero;
+                root.localRotation = Quaternion.identity;
+                root.localScale = Vector3.one;
+                return;
+            }
+
+            if (!string.IsNullOrWhiteSpace(alignment.coordinate_space) && alignment.coordinate_space != "unity_xz")
+            {
+                Debug.LogWarning($"Map alignment JSON uses coordinate_space '{alignment.coordinate_space}', expected 'unity_xz'.");
+            }
+
+            float scale = Mathf.Approximately(alignment.scale, 0f) ? 1f : alignment.scale;
+            MapAlignmentPosition position = alignment.position ?? new MapAlignmentPosition();
+            if (alignment.position == null)
+            {
+                position.y = defaultMapYOffset;
+            }
+            root.localPosition = new Vector3(position.x, position.y, position.z);
+            root.localRotation = Quaternion.Euler(0f, alignment.rotation_y_deg, 0f);
+            root.localScale = new Vector3(scale, scale, scale);
+
+            Debug.Log(
+                $"Applied map alignment from {alignmentPath}: " +
+                $"position=({position.x:F3}, {position.y:F3}, {position.z:F3}), " +
+                $"rotationY={alignment.rotation_y_deg:F3}, scale={scale:F3}, " +
+                $"fitness={alignment.fitness:F4}, rmse={alignment.rmse:F3}");
+        }
+
+        [ContextMenu("Toggle Blosm Map Geometry")]
+        public void ToggleBlosmMapGeometry()
+        {
+            Transform root = transform.Find(BlosmMapGeometryRootName);
+            if (root == null)
+            {
+                AttachBlosmColliders();
+                root = transform.Find(BlosmMapGeometryRootName);
+            }
+
+            if (root == null)
+            {
+                return;
+            }
+
+            SetRenderersVisible(root, !AnyRendererEnabled(root));
+        }
+
+        [ContextMenu("Clear Blosm Runtime Geometry")]
+        public void ClearBlosmRuntimeGeometry()
+        {
+            Transform child = transform.Find(BlosmMapGeometryRootName);
+            if (child != null)
+            {
+                DestroyUnityObject(child.gameObject);
+            }
+
+            walkableColliders.Clear();
+            buildingColliders.Clear();
+            blosmGeometryReady = false;
+        }
+
+        private void AttachAndClassifyMeshColliders(Transform root)
+        {
+            MeshFilter[] meshFilters = root.GetComponentsInChildren<MeshFilter>(true);
+            for (int i = 0; i < meshFilters.Length; i++)
+            {
+                Mesh sharedMesh = meshFilters[i].sharedMesh;
+                if (sharedMesh == null || sharedMesh.vertexCount == 0)
                 {
                     continue;
                 }
 
-                Mesh mesh = CreateExtrudedMesh(polygon.outerRing, colliderHeight, $"ObstacleCollider_{i}_Mesh");
-                GameObject colliderObject = new GameObject($"ObstacleCollider_{i}");
-                colliderObject.transform.SetParent(root.transform, false);
-
-                MeshCollider meshCollider = colliderObject.AddComponent<MeshCollider>();
-                meshCollider.sharedMesh = mesh;
-            }
-        }
-
-        /// <summary>
-        /// Loads nav_mesh.json from StreamingAssets using the Inspector path.
-        /// </summary>
-        [ContextMenu("Load NavMesh From StreamingAssets")]
-        public void LoadNavMeshFromStreamingAssets()
-        {
-            LoadNavMesh(navMeshJsonPath);
-        }
-
-        /// <summary>
-        /// Creates a translucent green runtime mesh for viewing the walkable area in the Game view.
-        /// </summary>
-        [ContextMenu("Generate Debug Walkable Mesh")]
-        public void GenerateDebugWalkableMesh()
-        {
-            Transform existingRoot = transform.Find("DebugWalkableMesh");
-            if (existingRoot != null)
-            {
-                DestroyUnityObject(existingRoot.gameObject);
-            }
-
-            GameObject root = new GameObject("DebugWalkableMesh");
-            root.transform.SetParent(transform, false);
-
-            Material material = CreateTransparentUnlitMaterial(walkableColor);
-
-            for (int i = 0; i < walkablePolygons.Count; i++)
-            {
-                Polygon2D polygon = walkablePolygons[i];
-                Mesh mesh = CreateFlatMesh(polygon.outerRing, 0.01f, $"WalkableDebug_{i}_Mesh");
-                if (mesh == null)
+                MeshCollider meshCollider = meshFilters[i].GetComponent<MeshCollider>();
+                if (meshCollider == null)
                 {
-                    continue;
+                    meshCollider = meshFilters[i].gameObject.AddComponent<MeshCollider>();
                 }
 
-                GameObject meshObject = new GameObject($"WalkableDebug_{i}");
-                meshObject.transform.SetParent(root.transform, false);
-                MeshFilter meshFilter = meshObject.AddComponent<MeshFilter>();
-                MeshRenderer meshRenderer = meshObject.AddComponent<MeshRenderer>();
-                meshFilter.sharedMesh = mesh;
-                meshRenderer.sharedMaterial = material;
-            }
-        }
+                meshFilters[i].gameObject.isStatic = true;
+                meshCollider.sharedMesh = sharedMesh;
+                meshCollider.convex = false;
 
-        private string ResolveJsonPath(string jsonPath)
-        {
-            if (string.IsNullOrWhiteSpace(jsonPath))
-            {
-                jsonPath = navMeshJsonPath;
-            }
-
-            return Path.IsPathRooted(jsonPath)
-                ? jsonPath
-                : Path.Combine(Application.streamingAssetsPath, jsonPath);
-        }
-
-        private static List<Polygon2D> ParseMultiPolygon(JToken token)
-        {
-            List<Polygon2D> polygons = new List<Polygon2D>();
-            JToken coordinates = token?["coordinates"];
-            if (coordinates == null)
-            {
-                return polygons;
-            }
-
-            foreach (JToken polygonToken in coordinates)
-            {
-                List<Vector2[]> rings = new List<Vector2[]>();
-                foreach (JToken ringToken in polygonToken)
+                string hierarchyName = BuildHierarchyName(meshFilters[i].transform);
+                if (ContainsAny(hierarchyName, WalkableKeywords))
                 {
-                    Vector2[] ring = ParseRing(ringToken);
-                    if (ring.Length >= 3)
-                    {
-                        rings.Add(ring);
-                    }
+                    walkableColliders.Add(meshCollider);
                 }
-
-                if (rings.Count == 0)
+                else if (ContainsAny(hierarchyName, BuildingKeywords))
                 {
-                    continue;
+                    buildingColliders.Add(meshCollider);
                 }
-
-                Polygon2D polygon = new Polygon2D
+                else
                 {
-                    outerRing = rings[0],
-                    holes = rings.Count > 1 ? rings.GetRange(1, rings.Count - 1).ToArray() : Array.Empty<Vector2[]>()
-                };
-                polygons.Add(polygon);
-            }
-
-            return polygons;
-        }
-
-        private static Vector2[] ParseRing(JToken ringToken)
-        {
-            List<Vector2> points = new List<Vector2>();
-            foreach (JToken pointToken in ringToken)
-            {
-                JArray pointArray = pointToken as JArray;
-                if (pointArray != null && pointArray.Count >= 2)
-                {
-                    points.Add(new Vector2(pointArray[0].Value<float>(), pointArray[1].Value<float>()));
+                    Debug.LogWarning($"Blosm mesh '{hierarchyName}' was not classified as walkable or building; collider kept for physics only.");
                 }
             }
-
-            return points.ToArray();
         }
 
-        private static Vector4 ParseBounds(JToken token)
+        private bool TryFindWalkableSurface(Vector2 point, out Vector3 hitPoint)
         {
-            JArray array = token as JArray;
-            if (array == null || array.Count < 4)
-            {
-                return Vector4.zero;
-            }
-
-            return new Vector4(array[0].Value<float>(), array[1].Value<float>(), array[2].Value<float>(), array[3].Value<float>());
-        }
-
-        private Dictionary<(int, int), List<int>> BuildGridIndex(IReadOnlyList<Polygon2D> polygons)
-        {
-            Dictionary<(int, int), List<int>> index = new Dictionary<(int, int), List<int>>();
-            for (int i = 0; i < polygons.Count; i++)
-            {
-                if (!TryGetAabb(polygons[i], out Vector2 min, out Vector2 max))
-                {
-                    continue;
-                }
-
-                int minCellX = WorldToCell(min.x);
-                int maxCellX = WorldToCell(max.x);
-                int minCellY = WorldToCell(min.y);
-                int maxCellY = WorldToCell(max.y);
-
-                for (int cellX = minCellX; cellX <= maxCellX; cellX++)
-                {
-                    for (int cellY = minCellY; cellY <= maxCellY; cellY++)
-                    {
-                        (int, int) key = (cellX, cellY);
-                        if (!index.TryGetValue(key, out List<int> polygonIndices))
-                        {
-                            polygonIndices = new List<int>();
-                            index[key] = polygonIndices;
-                        }
-
-                        polygonIndices.Add(i);
-                    }
-                }
-            }
-
-            return index;
-        }
-
-        private IEnumerable<int> QueryCandidatePolygons(Vector2 point, Dictionary<(int, int), List<int>> index, IReadOnlyList<Polygon2D> polygons)
-        {
-            HashSet<int> candidates = new HashSet<int>();
-            int centerX = WorldToCell(point.x);
-            int centerY = WorldToCell(point.y);
-
-            for (int dx = -1; dx <= 1; dx++)
-            {
-                for (int dy = -1; dy <= 1; dy++)
-                {
-                    if (!index.TryGetValue((centerX + dx, centerY + dy), out List<int> polygonIndices))
-                    {
-                        continue;
-                    }
-
-                    foreach (int polygonIndex in polygonIndices)
-                    {
-                        candidates.Add(polygonIndex);
-                    }
-                }
-            }
-
-            // 空索引时回退到全量检查，避免未加载或极小网格配置导致误判。
-            if (candidates.Count == 0 && polygons.Count > 0 && index.Count == 0)
-            {
-                for (int i = 0; i < polygons.Count; i++)
-                {
-                    candidates.Add(i);
-                }
-            }
-
-            return candidates;
-        }
-
-        private int WorldToCell(float value)
-        {
-            return Mathf.FloorToInt(value / Mathf.Max(0.001f, gridCellSize));
-        }
-
-        private bool IsInsideBounds(Vector2 point)
-        {
-            if (bounds == Vector4.zero)
-            {
-                return true;
-            }
-
-            return point.x >= bounds.x && point.x <= bounds.z && point.y >= bounds.y && point.y <= bounds.w;
-        }
-
-        private static bool TryGetAabb(Polygon2D polygon, out Vector2 min, out Vector2 max)
-        {
-            min = new Vector2(float.PositiveInfinity, float.PositiveInfinity);
-            max = new Vector2(float.NegativeInfinity, float.NegativeInfinity);
-
-            if (polygon.outerRing == null || polygon.outerRing.Length == 0)
+            hitPoint = default;
+            if (walkableColliders.Count == 0)
             {
                 return false;
             }
 
-            foreach (Vector2 point in polygon.outerRing)
-            {
-                min = Vector2.Min(min, point);
-                max = Vector2.Max(max, point);
-            }
+            Ray ray = new Ray(new Vector3(point.x, walkableRaycastHeight, point.y), Vector3.down);
+            float closestDistance = float.PositiveInfinity;
+            bool found = false;
 
-            return true;
-        }
-
-        private bool PointInPolygon(Vector2 point, Polygon2D polygon)
-        {
-            bool inside = PointInRing(point, polygon.outerRing);
-            if (inside && polygon.holes != null)
+            for (int i = 0; i < walkableColliders.Count; i++)
             {
-                foreach (Vector2[] hole in polygon.holes)
+                MeshCollider collider = walkableColliders[i];
+                if (collider == null || !collider.enabled)
                 {
-                    if (PointInRing(point, hole))
-                    {
-                        inside = false;
-                        break;
-                    }
+                    continue;
+                }
+
+                if (collider.Raycast(ray, out RaycastHit hit, walkableRaycastDistance) && hit.distance < closestDistance)
+                {
+                    closestDistance = hit.distance;
+                    hitPoint = hit.point;
+                    found = true;
                 }
             }
 
-            return inside;
+            return found;
         }
 
-        private bool PointInRing(Vector2 point, Vector2[] ring)
+        private GameObject LoadBlosmMapPrefab()
         {
-            if (ring == null || ring.Length < 3)
-            {
-                return false;
-            }
-
-            if (PointOnRing(point, ring, 0.001f))
-            {
-                return true;
-            }
-
-            bool inside = false;
-            int j = ring.Length - 1;
-            for (int i = 0; i < ring.Length; j = i++)
-            {
-                if ((ring[i].y > point.y) != (ring[j].y > point.y) &&
-                    point.x < (ring[j].x - ring[i].x) * (point.y - ring[i].y)
-                              / (ring[j].y - ring[i].y) + ring[i].x)
-                {
-                    inside = !inside;
-                }
-            }
-
-            return inside;
+#if UNITY_EDITOR
+            return AssetDatabase.LoadAssetAtPath<GameObject>(blosmMapAssetPath);
+#else
+            return null;
+#endif
         }
 
-        private static bool PointOnRing(Vector2 point, Vector2[] ring, float epsilon)
+        private static string BuildHierarchyName(Transform transform)
         {
-            float epsilonSq = epsilon * epsilon;
-            for (int i = 0; i < ring.Length; i++)
+            List<string> names = new List<string>();
+            Transform current = transform;
+            while (current != null)
             {
-                Vector2 a = ring[i];
-                Vector2 b = ring[(i + 1) % ring.Length];
-                if ((NearestPointOnSegment(point, a, b) - point).sqrMagnitude <= epsilonSq)
+                names.Add(current.name);
+                current = current.parent;
+            }
+
+            return string.Join("/", names).ToLowerInvariant();
+        }
+
+        private static bool ContainsAny(string value, IReadOnlyList<string> keywords)
+        {
+            for (int i = 0; i < keywords.Count; i++)
+            {
+                if (value.Contains(keywords[i]))
                 {
                     return true;
                 }
@@ -561,338 +461,121 @@ namespace GsVrNav.Unity
             return false;
         }
 
-        private static void FindNearestPointOnRing(Vector2 point, Vector2[] ring, ref Vector2 bestPoint, ref float bestDistanceSq)
+        private static bool AnyRendererEnabled(Transform root)
         {
-            if (ring == null || ring.Length < 2)
+            MeshRenderer[] renderers = root.GetComponentsInChildren<MeshRenderer>(true);
+            for (int i = 0; i < renderers.Length; i++)
             {
-                return;
-            }
-
-            for (int i = 0; i < ring.Length; i++)
-            {
-                Vector2 candidate = NearestPointOnSegment(point, ring[i], ring[(i + 1) % ring.Length]);
-                float distanceSq = (candidate - point).sqrMagnitude;
-                if (distanceSq < bestDistanceSq)
+                if (renderers[i].enabled)
                 {
-                    bestDistanceSq = distanceSq;
-                    bestPoint = candidate;
-                }
-            }
-        }
-
-        private static Vector2 NearestPointOnSegment(Vector2 p, Vector2 a, Vector2 b)
-        {
-            Vector2 ab = b - a;
-            float denominator = Vector2.Dot(ab, ab);
-            if (denominator <= 0.000001f)
-            {
-                return a;
-            }
-
-            float t = Mathf.Clamp01(Vector2.Dot(p - a, ab) / denominator);
-            return a + t * ab;
-        }
-
-        private static Mesh CreateFlatMesh(Vector2[] ring, float y, string meshName)
-        {
-            int[] indices = TriangulateEarClipping(ring);
-            if (indices.Length < 3)
-            {
-                return null;
-            }
-
-            Vector3[] vertices = new Vector3[ring.Length];
-            for (int i = 0; i < ring.Length; i++)
-            {
-                vertices[i] = new Vector3(ring[i].x, y, ring[i].y);
-            }
-
-            Mesh mesh = new Mesh { name = meshName };
-            mesh.vertices = vertices;
-            mesh.triangles = indices;
-            mesh.RecalculateNormals();
-            mesh.RecalculateBounds();
-            return mesh;
-        }
-
-        private static Mesh CreateExtrudedMesh(Vector2[] ring, float height, string meshName)
-        {
-            int[] flatTriangles = TriangulateEarClipping(ring);
-            List<Vector3> vertices = new List<Vector3>(ring.Length * 2);
-            List<int> triangles = new List<int>();
-
-            for (int i = 0; i < ring.Length; i++)
-            {
-                vertices.Add(new Vector3(ring[i].x, 0f, ring[i].y));
-            }
-
-            for (int i = 0; i < ring.Length; i++)
-            {
-                vertices.Add(new Vector3(ring[i].x, height, ring[i].y));
-            }
-
-            for (int i = 0; i < flatTriangles.Length; i += 3)
-            {
-                triangles.Add(flatTriangles[i + 2]);
-                triangles.Add(flatTriangles[i + 1]);
-                triangles.Add(flatTriangles[i]);
-
-                triangles.Add(flatTriangles[i] + ring.Length);
-                triangles.Add(flatTriangles[i + 1] + ring.Length);
-                triangles.Add(flatTriangles[i + 2] + ring.Length);
-            }
-
-            for (int i = 0; i < ring.Length; i++)
-            {
-                int next = (i + 1) % ring.Length;
-                int bottomA = i;
-                int bottomB = next;
-                int topA = i + ring.Length;
-                int topB = next + ring.Length;
-
-                triangles.Add(bottomA);
-                triangles.Add(topA);
-                triangles.Add(topB);
-                triangles.Add(bottomA);
-                triangles.Add(topB);
-                triangles.Add(bottomB);
-            }
-
-            Mesh mesh = new Mesh { name = meshName };
-            mesh.vertices = vertices.ToArray();
-            mesh.triangles = triangles.ToArray();
-            mesh.RecalculateNormals();
-            mesh.RecalculateBounds();
-            return mesh;
-        }
-
-        private static int[] TriangulateEarClipping(Vector2[] ring)
-        {
-            if (ring == null || ring.Length < 3)
-            {
-                return Array.Empty<int>();
-            }
-
-            List<int> vertices = new List<int>();
-            for (int i = 0; i < ring.Length; i++)
-            {
-                vertices.Add(i);
-            }
-
-            if (SignedArea(ring) < 0f)
-            {
-                vertices.Reverse();
-            }
-
-            List<int> triangles = new List<int>();
-            int guard = 0;
-            while (vertices.Count > 3 && guard < ring.Length * ring.Length)
-            {
-                bool earFound = false;
-                for (int i = 0; i < vertices.Count; i++)
-                {
-                    int previousIndex = vertices[(i - 1 + vertices.Count) % vertices.Count];
-                    int currentIndex = vertices[i];
-                    int nextIndex = vertices[(i + 1) % vertices.Count];
-
-                    if (!IsConvex(ring[previousIndex], ring[currentIndex], ring[nextIndex]))
-                    {
-                        continue;
-                    }
-
-                    bool containsPoint = false;
-                    for (int j = 0; j < vertices.Count; j++)
-                    {
-                        int testIndex = vertices[j];
-                        if (testIndex == previousIndex || testIndex == currentIndex || testIndex == nextIndex)
-                        {
-                            continue;
-                        }
-
-                        if (PointInTriangle(ring[testIndex], ring[previousIndex], ring[currentIndex], ring[nextIndex]))
-                        {
-                            containsPoint = true;
-                            break;
-                        }
-                    }
-
-                    if (containsPoint)
-                    {
-                        continue;
-                    }
-
-                    triangles.Add(previousIndex);
-                    triangles.Add(currentIndex);
-                    triangles.Add(nextIndex);
-                    vertices.RemoveAt(i);
-                    earFound = true;
-                    break;
-                }
-
-                if (!earFound)
-                {
-                    break;
-                }
-
-                guard++;
-            }
-
-            if (vertices.Count == 3)
-            {
-                triangles.Add(vertices[0]);
-                triangles.Add(vertices[1]);
-                triangles.Add(vertices[2]);
-            }
-
-            return triangles.ToArray();
-        }
-
-        private static float SignedArea(Vector2[] ring)
-        {
-            float area = 0f;
-            for (int i = 0; i < ring.Length; i++)
-            {
-                Vector2 a = ring[i];
-                Vector2 b = ring[(i + 1) % ring.Length];
-                area += a.x * b.y - b.x * a.y;
-            }
-
-            return area * 0.5f;
-        }
-
-        private static bool IsConvex(Vector2 previous, Vector2 current, Vector2 next)
-        {
-            Vector2 a = current - previous;
-            Vector2 b = next - current;
-            return a.x * b.y - a.y * b.x > 0f;
-        }
-
-        private static bool PointInTriangle(Vector2 p, Vector2 a, Vector2 b, Vector2 c)
-        {
-            float area = Mathf.Abs(Cross(b - a, c - a));
-            float area1 = Mathf.Abs(Cross(a - p, b - p));
-            float area2 = Mathf.Abs(Cross(b - p, c - p));
-            float area3 = Mathf.Abs(Cross(c - p, a - p));
-            return Mathf.Abs(area - (area1 + area2 + area3)) <= 0.0001f;
-        }
-
-        private static float Cross(Vector2 a, Vector2 b)
-        {
-            return a.x * b.y - a.y * b.x;
-        }
-
-        private static Material CreateTransparentUnlitMaterial(Color color)
-        {
-            Shader shader = Shader.Find("Universal Render Pipeline/Unlit");
-            if (shader == null)
-            {
-                shader = Shader.Find("Unlit/Color");
-            }
-
-            Material material = new Material(shader)
-            {
-                name = "WalkableDebugTransparentMaterial",
-                color = color
-            };
-
-            if (material.HasProperty("_BaseColor"))
-            {
-                material.SetColor("_BaseColor", color);
-            }
-
-            material.SetFloat("_Surface", 1f);
-            material.SetOverrideTag("RenderType", "Transparent");
-            material.renderQueue = 3000;
-            material.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
-            return material;
-        }
-
-        private void OnDrawGizmos()
-        {
-            const float gizmoY = 0.01f;
-
-            if (drawWalkableArea)
-            {
-                Gizmos.color = walkableColor;
-                foreach (Polygon2D polygon in walkablePolygons)
-                {
-                    DrawRingLines(polygon.outerRing, gizmoY);
-                    if (polygon.holes == null)
-                    {
-                        continue;
-                    }
-
-                    foreach (Vector2[] hole in polygon.holes)
-                    {
-                        DrawRingLines(hole, gizmoY);
-                    }
+                    return true;
                 }
             }
 
-            if (drawObstacles)
-            {
-                Gizmos.color = obstacleColor;
-                foreach (Polygon2D polygon in obstaclePolygons)
-                {
-                    Mesh mesh = CreateFlatMesh(polygon.outerRing, gizmoY + 0.01f, "ObstacleGizmoMesh");
-                    if (mesh != null)
-                    {
-                        Gizmos.DrawMesh(mesh);
-                        DestroyUnityObject(mesh);
-                    }
+            return false;
+        }
 
-                    DrawRingLines(polygon.outerRing, gizmoY + 0.02f);
-                }
-            }
-
-            if (bounds != Vector4.zero)
+        private static void SetRenderersVisible(Transform root, bool visible)
+        {
+            MeshRenderer[] renderers = root.GetComponentsInChildren<MeshRenderer>(true);
+            for (int i = 0; i < renderers.Length; i++)
             {
-                Gizmos.color = Color.cyan;
-                Vector3 a = new Vector3(bounds.x, 0.05f, bounds.y);
-                Vector3 b = new Vector3(bounds.z, 0.05f, bounds.y);
-                Vector3 c = new Vector3(bounds.z, 0.05f, bounds.w);
-                Vector3 d = new Vector3(bounds.x, 0.05f, bounds.w);
-                Gizmos.DrawSphere(a, 0.2f);
-                Gizmos.DrawSphere(b, 0.2f);
-                Gizmos.DrawSphere(c, 0.2f);
-                Gizmos.DrawSphere(d, 0.2f);
-                Gizmos.DrawLine(a, b);
-                Gizmos.DrawLine(b, c);
-                Gizmos.DrawLine(c, d);
-                Gizmos.DrawLine(d, a);
+                renderers[i].enabled = visible;
             }
         }
 
-        private static void DrawRingLines(Vector2[] ring, float y)
+        private static string ResolveProjectRelativePath(string path)
         {
-            if (ring == null || ring.Length < 2)
+            if (Path.IsPathRooted(path))
             {
-                return;
+                return Path.GetFullPath(path);
             }
 
-            for (int i = 0; i < ring.Length; i++)
+            string projectRoot = Directory.GetParent(Application.dataPath).FullName;
+            return Path.GetFullPath(Path.Combine(projectRoot, path));
+        }
+
+        private static string ResolveStreamingAssetsPath(string path)
+        {
+            if (Path.IsPathRooted(path))
             {
-                Vector2 start = ring[i];
-                Vector2 end = ring[(i + 1) % ring.Length];
-                Gizmos.DrawLine(new Vector3(start.x, y, start.y), new Vector3(end.x, y, end.y));
+                return Path.GetFullPath(path);
             }
+
+            return Path.GetFullPath(Path.Combine(Application.streamingAssetsPath, path));
+        }
+
+        private static string ProjectAbsolutePathToAssetPath(string absolutePath)
+        {
+            string projectRoot = Directory.GetParent(Application.dataPath).FullName;
+            string fullPath = Path.GetFullPath(absolutePath).Replace('\\', '/');
+            string fullProjectRoot = Path.GetFullPath(projectRoot).Replace('\\', '/');
+            if (fullPath.StartsWith(fullProjectRoot + "/", StringComparison.OrdinalIgnoreCase))
+            {
+                return fullPath.Substring(fullProjectRoot.Length + 1);
+            }
+
+            return absolutePath;
+        }
+
+        private static string JoinCommandLineArguments(IReadOnlyList<string> arguments)
+        {
+            List<string> quoted = new List<string>(arguments.Count);
+            for (int i = 0; i < arguments.Count; i++)
+            {
+                quoted.Add(QuoteCommandLineArgument(arguments[i]));
+            }
+
+            return string.Join(" ", quoted);
+        }
+
+        private static string QuoteCommandLineArgument(string argument)
+        {
+            if (string.IsNullOrEmpty(argument))
+            {
+                return "\"\"";
+            }
+
+            if (argument.IndexOfAny(new[] { ' ', '\t', '"' }) < 0)
+            {
+                return argument;
+            }
+
+            return "\"" + argument.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
         }
 
         private static void DestroyUnityObject(UnityEngine.Object unityObject)
         {
-            if (unityObject == null)
-            {
-                return;
-            }
-
             if (Application.isPlaying)
             {
-                UnityEngine.Object.Destroy(unityObject);
+                Destroy(unityObject);
             }
             else
             {
-                UnityEngine.Object.DestroyImmediate(unityObject);
+                DestroyImmediate(unityObject);
             }
+        }
+
+        [Serializable]
+        private sealed class MapAlignmentJson
+        {
+            public string coordinate_space;
+            public MapAlignmentPosition position;
+            public float rotation_y_deg;
+            public float scale = 1f;
+            public float fitness;
+            public float rmse;
+            public int source_count;
+            public int target_count;
+            public string source;
+        }
+
+        [Serializable]
+        private sealed class MapAlignmentPosition
+        {
+            public float x;
+            public float y;
+            public float z;
         }
     }
 }

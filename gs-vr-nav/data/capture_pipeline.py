@@ -131,6 +131,8 @@ def process_image_directory(
     extensions = cfg.get("extensions", DEFAULT_EXTENSIONS)
     max_accuracy_m = cfg.get("max_gps_accuracy_m")
 
+    # CN: 第一阶段只保留带可用 GPS 的图片；没有 GPS 的图片无法作为地理对齐锚点。
+    # EN: First keep only images with usable GPS, because later alignment needs GPS anchors.
     captures: list[tuple[Path, dict[str, float | None]]] = []
     for image_path in discover_images(input_dir, extensions):
         gps = extract_exif_gps(image_path)
@@ -144,6 +146,8 @@ def process_image_directory(
     if not captures:
         raise ValueError(f"No images with usable GPS EXIF found in {input_dir}")
 
+    # CN: ENU 是局部米制坐标系，需要选择一个 WGS84 原点；默认用第一张有效图片。
+    # EN: ENU is a local metric frame, so we choose a WGS84 origin; by default, the first valid image.
     origin_wgs84 = cfg.get("origin_wgs84")
     if origin_wgs84 is None:
         origin_gps = captures[0][1]
@@ -153,6 +157,8 @@ def process_image_directory(
     else:
         origin_lat, origin_lon, origin_alt = (float(value) for value in origin_wgs84)
 
+    # CN: 每一帧同时保存原始 GPS、局部 ENU、粗略朝向和相机内参，供 COLMAP/对齐阶段使用。
+    # EN: Each frame stores raw GPS, local ENU, rough heading, and camera intrinsics for reconstruction/alignment.
     frames = []
     for image_path, gps in captures:
         e, n, u = gps_to_enu(

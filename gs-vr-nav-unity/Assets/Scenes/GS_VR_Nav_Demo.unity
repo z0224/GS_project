@@ -129,6 +129,7 @@ GameObject:
   m_Component:
   - component: {fileID: 857017136}
   - component: {fileID: 857017135}
+  - component: {fileID: 857017137}
   m_Layer: 0
   m_Name: GaussianSplatScene
   m_TagString: Untagged
@@ -146,9 +147,10 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 13d348fdde9e2c34eaed7c7e747acf3e, type: 3}
-  m_Name: 
+  m_Name:
   m_EditorClassIdentifier: Assembly-CSharp::GsVrNav.Unity.GaussianSplatSetup
   splatFileName: aligned_scene.ply
+  fallbackSplatFileName: refined_scene.ply
   maxSplatCount: 5000000
   shDegree: 3
   applyENUToUnityRotation: 1
@@ -168,6 +170,33 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &857017137
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 857017134}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: c12d929a7f62c48adbe9ff45c9a33ff0, type: 3}
+  m_Name:
+  m_EditorClassIdentifier: GaussianSplatting::GaussianSplatting.Runtime.GaussianSplatRenderer
+  m_Asset: {fileID: 11400000, guid: 476521f78a90a30489112d42f4c79604, type: 2}
+  m_RenderOrder: 0
+  m_SplatScale: 1
+  m_OpacityScale: 1
+  m_SHOrder: 3
+  m_SHOnly: 0
+  m_SortNthFrame: 1
+  m_RenderMode: 0
+  m_PointDisplaySize: 3
+  m_Cutouts: []
+  m_ShaderSplats: {fileID: 4800000, guid: ed800126ae8844a67aad1974ddddd59c, type: 3}
+  m_ShaderComposite: {fileID: 4800000, guid: 7e184af7d01193a408eb916d8acafff9, type: 3}
+  m_ShaderDebugPoints: {fileID: 4800000, guid: b44409fc67214394f8f47e4e2648425e, type: 3}
+  m_ShaderDebugBoxes: {fileID: 4800000, guid: 4006f2680fd7c8b4cbcb881454c782be, type: 3}
+  m_CSSplatUtilities: {fileID: 7200000, guid: ec84f78b836bd4f96a105d6b804f08bd, type: 3}
 --- !u!1001 &1288639219
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -252,7 +281,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 6875cb32365929544988cd11bb2c3fc5, type: 3}
-  m_Name: 
+  m_Name:
   m_EditorClassIdentifier: Assembly-CSharp::GsVrNav.Unity.MinimapController
   mapSize: 256
   viewRange: 100
@@ -262,6 +291,7 @@ MonoBehaviour:
   geoLoader: {fileID: 1731660780}
   playerTransform: {fileID: 1991526488}
   toggleKey: 109
+  rotateWithPlayerView: 1
 --- !u!4 &1338554344
 Transform:
   m_ObjectHideFlags: 0
@@ -304,15 +334,19 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: a795d9b1deab12a4e82e2dcf66334dce, type: 3}
-  m_Name: 
+  m_Name:
   m_EditorClassIdentifier: Assembly-CSharp::GsVrNav.Unity.GeoAlignmentLoader
-  navMeshJsonPath: nav_mesh.json
-  gridCellSize: 5
   loadOnAwake: 1
-  drawWalkableArea: 1
-  drawObstacles: 1
-  walkableColor: {r: 0, g: 1, b: 0, a: 0.3}
-  obstacleColor: {r: 1, g: 0, b: 0, a: 0.5}
+  showBlosmMapGeometryOnLoad: 0
+  blosmMapAssetPath: Assets/External/BlosmMap/Blosm_Map.fbx
+  blosmGeneratorWorkingDirectory: ../gs-vr-nav
+  blosmTransformsJsonPath: transforms.json
+  blosmPythonExecutable: python
+  blenderExecutablePath:
+  walkableRaycastHeight: 20
+  walkableRaycastDistance: 60
+  safePointSearchRadius: 6
+  safePointSearchStep: 0.5
 --- !u!4 &1731660781
 Transform:
   m_ObjectHideFlags: 0
@@ -413,11 +447,13 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 8b162a4f7565084429ae04fffc829626, type: 3}
-  m_Name: 
+  m_Name:
   m_EditorClassIdentifier: Assembly-CSharp::GsVrNav.Unity.VRNavigationController
-  moveSpeed: 1.4
+  moveSpeed: 3
   deadZone: 0.15
   boundaryLerpFactor: 0.3
+  snapToWalkableOnStart: 1
+  usePhysicsCharacterController: 1
   moveInput: {fileID: 11400000, guid: 52b143a9b0bc23d41a1760d176ae9879, type: 2}
   geoAlignmentLoader: {fileID: 1731660780}
   xrOrigin: {fileID: 1991526488}

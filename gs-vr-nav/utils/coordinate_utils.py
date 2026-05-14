@@ -65,6 +65,8 @@ def gps_to_enu(
     origin_alt: float = 0.0,
 ) -> tuple[float, float, float]:
     """Convert WGS84 coordinates to local East-North-Up coordinates in meters."""
+    # CN: 先转到地心 ECEF，再减去原点并旋转到局部 ENU；这样经纬度就变成米。
+    # EN: Convert to ECEF, subtract the origin, then rotate into ENU so lat/lon becomes meters.
     point_ecef = np.array(wgs84_to_ecef(lat, lon, alt), dtype=float)
     origin_ecef = np.array(wgs84_to_ecef(origin_lat, origin_lon, origin_alt), dtype=float)
     enu = _origin_rotation(origin_lat, origin_lon) @ (point_ecef - origin_ecef)
@@ -91,6 +93,8 @@ def enu_to_gps(
 
 def heading_to_rotation_matrix(heading_deg: float) -> np.ndarray:
     """Convert compass heading to a 3x3 rotation matrix in ENU coordinates."""
+    # CN: heading 是平面方向角，这里只绕 Up 轴旋转，不改变高度方向。
+    # EN: Heading is a horizontal bearing, so this rotates around the Up axis only.
     heading = np.radians(heading_deg)
     cos_h = np.cos(heading)
     sin_h = np.sin(heading)

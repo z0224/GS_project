@@ -16,8 +16,6 @@ if __name__ == "__main__":
             "Pillow>=9.5",
             "piexif>=1.1.3",
             "pyproj>=3.5",
-            "osmnx>=1.5",
-            "shapely>=2.0",
             "matplotlib>=3.7",
             "open3d>=0.17",
             "plyfile>=1.0",

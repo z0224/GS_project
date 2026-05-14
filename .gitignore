@@ -1,6 +1,7 @@
 # Codex / test temp
 codex-*/
 **/codex-*/
+.claude/
 .pytest-tmp/
 .pytest-tmp-local/
 .pytest_cache/
@@ -14,8 +15,16 @@ cache/
 # Unity generated
 gs-vr-nav-unity/Library/
 gs-vr-nav-unity/Logs/
+gs-vr-nav-unity/Temp/
 gs-vr-nav-unity/UserSettings/
+gs-vr-nav-unity/Assets/_Recovery/
+gs-vr-nav-unity/Assets/_Recovery.meta
 *.log
+
+# local capture/training outputs
+captures/
+outputs/
+gs-vr-nav-unity/Assets/StreamingAssets/SplatScenes/*.ply
 
 # nested external repo
 external/

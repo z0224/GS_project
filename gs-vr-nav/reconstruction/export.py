@@ -102,6 +102,8 @@ def apply_transform(data: GaussianSplatData, transform: np.ndarray) -> GaussianS
     if transform.shape != (4, 4):
         raise ValueError(f"transform must have shape (4, 4), got {transform.shape}")
 
+    # CN: 4x4 对齐矩阵同时包含旋转和统一尺度；位置、旋转、scale 都需要同步更新。
+    # EN: The 4x4 alignment matrix contains rotation and uniform scale, so positions, rotations, and scales all change.
     linear = transform[:3, :3]
     scale = float(np.cbrt(abs(np.linalg.det(linear))))
     if scale <= 0.0:
@@ -109,6 +111,8 @@ def apply_transform(data: GaussianSplatData, transform: np.ndarray) -> GaussianS
 
     rotation_matrix = linear / scale
     transform_quat = _matrix_to_quaternion(rotation_matrix)
+    # CN: 位置直接做仿射变换；Gaussian 自身朝向用四元数乘法叠加全局旋转。
+    # EN: Positions use the affine transform; Gaussian orientations compose the global rotation as quaternions.
     transformed_positions = (data.positions @ linear.T) + transform[:3, 3]
     transformed_rotations = _normalize_quaternions(
         _quaternion_multiply(

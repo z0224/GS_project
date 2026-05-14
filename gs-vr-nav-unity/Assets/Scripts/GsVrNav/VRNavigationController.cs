@@ -21,6 +21,7 @@
 // │ Unity(x, y, z) = (ENU.east, ENU.up, ENU.north)        │
 // └──────────────────────────────────────────────────────┘
 
+using System.Collections;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
@@ -33,13 +34,19 @@ namespace GsVrNav.Unity
     {
         [Header("Movement Settings")]
         [SerializeField]
-        private float moveSpeed = 1.4f;
+        private float moveSpeed = 3.0f;
 
         [SerializeField]
         private float deadZone = 0.15f;
 
         [SerializeField]
         private float boundaryLerpFactor = 0.3f;
+
+        [SerializeField]
+        private bool snapToWalkableOnStart = true;
+
+        [SerializeField]
+        private bool usePhysicsCharacterController = true;
 
         [Header("Input")]
         [SerializeField]
@@ -68,6 +75,7 @@ namespace GsVrNav.Unity
         private float currentSpeed;
         private float lastClampLogTime = -999f;
         private float fps;
+        private CharacterController characterController;
 
         private void Awake()
         {
@@ -89,6 +97,45 @@ namespace GsVrNav.Unity
                 geoAlignmentLoader = FindObjectOfType<GeoAlignmentLoader>();
 #endif
             }
+
+            if (usePhysicsCharacterController)
+            {
+                characterController = xrOrigin.GetComponent<CharacterController>();
+                if (characterController == null)
+                {
+                    characterController = xrOrigin.gameObject.AddComponent<CharacterController>();
+                }
+
+                characterController.radius = PlayerRadiusMeters;
+                characterController.height = 1.8f;
+                characterController.center = new Vector3(0f, 0.9f, 0f);
+                characterController.skinWidth = 0.03f;
+                characterController.minMoveDistance = 0f;
+            }
+        }
+
+        private IEnumerator Start()
+        {
+            yield return null;
+            SnapToSafeWalkableStart();
+        }
+
+        private void SnapToSafeWalkableStart()
+        {
+            if (!snapToWalkableOnStart || geoAlignmentLoader == null || xrOrigin == null)
+            {
+                return;
+            }
+
+            Vector3 position = xrOrigin.position;
+            if (geoAlignmentLoader.IsWalkable(position.x, position.z))
+            {
+                return;
+            }
+
+            Vector2 snapped = geoAlignmentLoader.FindSafeWalkablePoint(position.x, position.z);
+            SetPlayerPosition(new Vector3(snapped.x, 0f, snapped.y));
+            Debug.Log($"Player start position was outside the OSM walkable area and was snapped to ({snapped.x:F2}, {snapped.y:F2}).");
         }
 
         private void OnEnable()
@@ -108,6 +155,8 @@ namespace GsVrNav.Unity
 
             fps = Time.unscaledDeltaTime > 0f ? 1f / Time.unscaledDeltaTime : 0f;
 
+            // CN: 输入可以来自 XRI 手柄，也可以 fallback 到键盘 WASD，方便编辑器演示。
+            // EN: Input can come from XRI controllers or fall back to WASD for editor demos.
             Vector2 input = ReadMoveInput();
             Vector2 adjustedInput = ApplyDeadZone(input);
             Vector3 movementDirection = CalculateHeadDirectedMovement(adjustedInput);
@@ -116,12 +165,20 @@ namespace GsVrNav.Unity
             lastMovementWorld = movementDirection * currentSpeed;
             wasClampedLastFrame = false;
 
+            if (geoAlignmentLoader != null && !geoAlignmentLoader.BlosmGeometryReady)
+            {
+                currentSpeed = 0f;
+                return;
+            }
+
             Vector3 currentPosition = xrOrigin.position;
             currentPosition.y = 0f; // MVP 地面高度锁定：玩家始终在 Unity y=0 平面移动。
 
             Vector3 proposed = currentPosition + lastMovementWorld * Time.deltaTime;
             proposed.y = 0f;
 
+            // CN: Unity 的 XZ 平面对应 Python ENU 的 East/North，所以导航查询传入 (x, z)。
+            // EN: Unity XZ maps to Python ENU East/North, so navigation queries use (x, z).
             if (geoAlignmentLoader != null)
             {
                 // Unity XZ 平面直接对应 ENU (East, North)，所以查询时传入 (x, z)。
@@ -147,7 +204,35 @@ namespace GsVrNav.Unity
                 }
             }
 
-            xrOrigin.position = proposed;
+            MovePlayer(proposed - xrOrigin.position);
+        }
+
+        private void MovePlayer(Vector3 delta)
+        {
+            delta.y = 0f;
+            if (usePhysicsCharacterController && characterController != null && characterController.enabled)
+            {
+                characterController.Move(delta);
+                Vector3 position = xrOrigin.position;
+                position.y = 0f;
+                xrOrigin.position = position;
+                return;
+            }
+
+            xrOrigin.position += delta;
+        }
+
+        private void SetPlayerPosition(Vector3 position)
+        {
+            if (characterController != null)
+            {
+                characterController.enabled = false;
+                xrOrigin.position = position;
+                characterController.enabled = true;
+                return;
+            }
+
+            xrOrigin.position = position;
         }
 
         private Vector2 ReadMoveInput()
@@ -197,6 +282,8 @@ namespace GsVrNav.Unity
             }
 
             // 死区外线性重映射：deadZone 刚外侧为 0，摇杆满幅为 1。
+            // CN: 死区外重新映射输入强度，避免手柄轻微漂移导致角色慢慢滑动。
+            // EN: Remap input outside the dead zone to prevent small controller drift from moving the player.
             float normalizedMagnitude = Mathf.InverseLerp(deadZone, 1f, Mathf.Clamp01(magnitude));
             return input.normalized * normalizedMagnitude;
         }
@@ -208,6 +295,8 @@ namespace GsVrNav.Unity
                 return Vector3.zero;
             }
 
+            // CN: 头部朝向决定“前方”，这样 VR 中移动方向符合用户视线。
+            // EN: The headset direction defines "forward", making movement follow the user's view direction.
             Transform referenceTransform = headCamera != null ? headCamera.transform : xrOrigin;
 
             Vector3 forward = Vector3.ProjectOnPlane(referenceTransform.forward, Vector3.up).normalized;
@@ -286,7 +375,7 @@ namespace GsVrNav.Unity
             };
 
             string text =
-                $"Position: ({position.x:F1}, {0f:F1}, {position.z:F1})\n" +
+                $"Position: ({position.x:F2}, {0f:F2}, {position.z:F2})\n" +
                 $"Speed: {currentSpeed:F1} m/s\n" +
                 $"Walkable: {(walkable ? "Yes" : "No")}\n" +
                 $"FPS: {Mathf.RoundToInt(fps)}";

@@ -65,7 +65,6 @@ public static class GsVrNavDemoSceneBuilder
 
         GameObject minimap = new GameObject("MinimapController");
         MinimapController minimapController = minimap.AddComponent<MinimapController>();
-        AssignSerializedReference(minimapController, "geoLoader", geoLoader);
         AssignSerializedReference(minimapController, "playerTransform", xrOrigin.transform);
 
         EditorSceneManager.SaveScene(scene, ScenePath);

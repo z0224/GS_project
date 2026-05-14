@@ -47,6 +47,8 @@ def umeyama_alignment(
     if n < 3:
         raise ValueError("At least 3 anchor points are required for 3D similarity alignment")
 
+    # CN: Umeyama 方法先把两组点移到各自中心，再用 SVD 求最佳旋转/尺度/平移。
+    # EN: Umeyama alignment centers both point sets, then uses SVD for optimal rotation/scale/translation.
     mu_s = source.mean(axis=0)
     mu_t = target.mean(axis=0)
 
@@ -218,6 +220,8 @@ def compute_anchor_pairs(
     source_points = []
     target_points = []
 
+    # CN: 同一张图片在 transforms.json 中有 GPS/ENU，在 COLMAP images.bin 中有重建相机中心。
+    # EN: The same image has GPS/ENU in transforms.json and a reconstructed camera center in images.bin.
     for frame in transforms_json.get("frames", []):
         if not isinstance(frame, dict):
             continue
@@ -302,6 +306,8 @@ def align_pipeline(
         transforms_json = json.load(handle)
 
     colmap_images = read_colmap_images_binary(colmap_images_bin_path)
+    # CN: source 是 COLMAP 任意坐标，target 是真实 ENU 米制坐标。
+    # EN: source is COLMAP's arbitrary coordinate frame; target is the real-world ENU metric frame.
     source, target = compute_anchor_pairs(transforms_json, colmap_images)
     transform, info = umeyama_alignment(source, target, with_scale=True)
 

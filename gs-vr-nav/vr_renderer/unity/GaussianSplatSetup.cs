@@ -49,6 +49,9 @@ namespace GsVrNav.Unity
         private string splatFileName = "aligned_scene.ply";
 
         [SerializeField]
+        private string fallbackSplatFileName = "refined_scene.ply";
+
+        [SerializeField]
         private int maxSplatCount = 5_000_000;
 
         [SerializeField]
@@ -82,10 +85,16 @@ namespace GsVrNav.Unity
             {
                 // ENU: X=East, Y=North, Z=Up → Unity: X=East, Y=Up, Z=North。
                 // 绕 X 轴旋转 -90° 将 ENU.Up(Z) 映射到 Unity.Up(Y)，并让 ENU.North(Y) 落到 Unity.Forward(Z)。
-                transform.rotation = Quaternion.Euler(-90f, 0f, 0f);
+                transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+                transform.localScale = new Vector3(1f, 1f, -1f);
+            }
+            else
+            {
+                transform.localRotation = Quaternion.identity;
+                transform.localScale = Vector3.one;
             }
 
-            transform.position = Vector3.zero;
+            transform.localPosition = Vector3.zero;
 
             ConfigureRendererBestEffort();
         }
@@ -139,17 +148,37 @@ namespace GsVrNav.Unity
                 return;
             }
 
-            string splatPath = Path.Combine(Application.streamingAssetsPath, "SplatScenes", splatFileName);
+            string resolvedSplatFileName = ResolveSplatFileName();
+            string splatPath = Path.Combine(Application.streamingAssetsPath, "SplatScenes", resolvedSplatFileName);
 
             // 插件版本间字段名可能会变化；这里用反射做宽松配置，避免把 MVP 脚本绑定到某个内部 API。
-            TrySetMember(gaussianSplatRenderer, "m_FileName", splatFileName);
+            TrySetMember(gaussianSplatRenderer, "m_FileName", resolvedSplatFileName);
             TrySetMember(gaussianSplatRenderer, "m_FilePath", splatPath);
-            TrySetMember(gaussianSplatRenderer, "splatFileName", splatFileName);
+            TrySetMember(gaussianSplatRenderer, "splatFileName", resolvedSplatFileName);
             TrySetMember(gaussianSplatRenderer, "splatFilePath", splatPath);
             TrySetMember(gaussianSplatRenderer, "maxSplatCount", maxSplatCount);
             TrySetMember(gaussianSplatRenderer, "m_MaxSplatCount", maxSplatCount);
             TrySetMember(gaussianSplatRenderer, "shDegree", shDegree);
             TrySetMember(gaussianSplatRenderer, "m_SHDegree", shDegree);
+        }
+
+        private string ResolveSplatFileName()
+        {
+            string primaryPath = Path.Combine(Application.streamingAssetsPath, "SplatScenes", splatFileName);
+            if (File.Exists(primaryPath))
+            {
+                return splatFileName;
+            }
+
+            string fallbackPath = Path.Combine(Application.streamingAssetsPath, "SplatScenes", fallbackSplatFileName);
+            if (File.Exists(fallbackPath))
+            {
+                Debug.LogWarning($"Splat file '{splatFileName}' was not found; falling back to '{fallbackSplatFileName}'.");
+                return fallbackSplatFileName;
+            }
+
+            Debug.LogWarning($"Neither splat file '{splatFileName}' nor fallback '{fallbackSplatFileName}' was found in StreamingAssets/SplatScenes.");
+            return splatFileName;
         }
 
         private static void TrySetMember(Component target, string memberName, object value)

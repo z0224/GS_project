@@ -13,11 +13,11 @@ from pathlib import Path
 from typing import Iterable
 from xml.etree import ElementTree
 
+from PIL import Image
+
 try:
-    from data.capture_pipeline import estimate_intrinsics
     from utils.coordinate_utils import gps_to_enu, heading_to_rotation_matrix
 except ImportError:  # pragma: no cover - package import fallback
-    from gs_vr_nav.data.capture_pipeline import estimate_intrinsics
     from gs_vr_nav.utils.coordinate_utils import gps_to_enu, heading_to_rotation_matrix
 
 
@@ -29,6 +29,22 @@ class GPXPoint:
     lat: float
     lon: float
     alt: float = 0.0
+
+
+def estimate_frame_intrinsics(image_path: str | Path) -> dict[str, float | int]:
+    """Estimate simple pinhole intrinsics from an extracted video frame."""
+
+    with Image.open(image_path) as image:
+        width, height = image.size
+    focal = float(max(width, height) * 1.2)
+    return {
+        "w": int(width),
+        "h": int(height),
+        "fx": focal,
+        "fy": focal,
+        "cx": float(width) / 2.0,
+        "cy": float(height) / 2.0,
+    }
 
 
 def parse_datetime_utc(value: str) -> datetime:
@@ -114,6 +130,8 @@ def interpolate_gpx_point(points: Iterable[GPXPoint], timestamp: datetime) -> GP
     if index == 0:
         return sorted_points[0]
 
+    # CN: 视频帧时间通常不会刚好落在 GPX 采样点上，所以在相邻轨迹点之间线性插值。
+    # EN: A video frame rarely lands exactly on a GPX sample, so interpolate between neighboring track points.
     before = sorted_points[index - 1]
     after = sorted_points[index]
     span_s = (after.timestamp - before.timestamp).total_seconds()
@@ -194,6 +212,8 @@ def generate_transforms_from_video_gpx(
 
     output = Path(output_dir)
     frames_dir = output / "frames"
+    # CN: 先把视频转换成图片序列，这样后续流程可以复用图片版 transforms.json 格式。
+    # EN: Convert video to an image sequence first, so the rest of the pipeline can reuse the image format.
     frames = extract_video_frames(video_path, frames_dir, frame_rate=frame_rate)
     gpx_points = load_gpx_points(gpx_path)
     start_time = (
@@ -202,6 +222,8 @@ def generate_transforms_from_video_gpx(
         else video_start_time.astimezone(timezone.utc)
     )
 
+    # CN: 根据“视频开始绝对时间 + 帧序号/帧率”计算每帧的真实 UTC 时间。
+    # EN: Compute each frame's UTC time from video start time plus frame index / frame rate.
     frame_gps: list[GPXPoint] = []
     for index, _frame_path in enumerate(frames):
         frame_time = start_time.timestamp() + index / frame_rate
@@ -228,7 +250,7 @@ def generate_transforms_from_video_gpx(
                 },
                 "enu": {"e": e, "n": n, "u": u},
                 "rotation_matrix": heading_to_rotation_matrix(heading).tolist(),
-                "intrinsics": estimate_intrinsics(frame_path),
+                "intrinsics": estimate_frame_intrinsics(frame_path),
             }
         )
 

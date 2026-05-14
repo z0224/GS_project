@@ -43,6 +43,8 @@ class GaussianSplattingTrainer:
         sparse_path = self.colmap_workspace / "sparse"
         sparse_path.mkdir(parents=True, exist_ok=True)
 
+        # CN: COLMAP 三步：提特征、做匹配、根据匹配结果恢复稀疏相机/点云结构。
+        # EN: COLMAP runs in three steps: feature extraction, matching, and sparse mapping.
         commands = [
             [
                 colmap_executable,
@@ -90,6 +92,8 @@ class GaussianSplattingTrainer:
             raise FileNotFoundError(f"COLMAP workspace does not exist: {self.colmap_workspace}")
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        # CN: 这里委托官方 3DGS 仓库训练，当前项目只负责组织输入输出和参数。
+        # EN: Training is delegated to the official 3DGS repo; this project manages paths and parameters.
         command = [
             sys.executable,
             str(train_script),
