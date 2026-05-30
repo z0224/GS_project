@@ -8,6 +8,9 @@ from geo_alignment.generate_blosm_map import generate_blosm_map_asset, radius_fr
 
 def _write_transforms(path):
     payload = {
+        "origin_lat": -27.5,
+        "origin_lon": 153.1,
+        "origin_alt": 42.0,
         "frames": [
             {"file_path": "frames/frame_000001.jpg", "gps": {"lat": -27.0, "lon": 153.0}},
             {"file_path": "frames/frame_000002.jpg", "gps": {"lat": -27.2, "lon": 153.4}},
@@ -36,8 +39,11 @@ def test_resolve_request_from_transforms_and_config(tmp_path) -> None:
         config_path=config_path,
     )
 
-    assert request.center_lat == pytest.approx(-27.1)
-    assert request.center_lon == pytest.approx(153.2)
+    assert request.center_lat == pytest.approx(-27.5)
+    assert request.center_lon == pytest.approx(153.1)
+    assert request.origin_lat == pytest.approx(-27.5)
+    assert request.origin_lon == pytest.approx(153.1)
+    assert request.origin_alt == pytest.approx(42.0)
     assert request.radius_m == 456.0
     assert request.output_path == output_path
 
@@ -69,6 +75,8 @@ def test_generate_blosm_map_asset_builds_blender_command(tmp_path) -> None:
         {
             "center_lat": -27.485,
             "center_lon": 153.0033,
+            "origin_wgs84": {"lat": -27.485, "lon": 153.0033, "alt": 0.0},
+            "blosm_origin_wgs84": {"lat": -27.485, "lon": 153.0033, "alt": 0.0},
             "radius_m": 250.0,
             "output_path": str(output_path.resolve()),
         }

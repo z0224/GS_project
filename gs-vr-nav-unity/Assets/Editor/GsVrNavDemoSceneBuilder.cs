@@ -9,7 +9,6 @@ using GsVrNav.Unity;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
-using UnityEngine.InputSystem;
 using UnityEngine.SceneManagement;
 
 /// <summary>
@@ -58,7 +57,6 @@ public static class GsVrNavDemoSceneBuilder
         AssignSerializedReference(navigationController, "geoAlignmentLoader", geoLoader);
         AssignSerializedReference(navigationController, "xrOrigin", xrOrigin.transform);
         AssignSerializedReference(navigationController, "headCamera", headCamera);
-        AssignMoveInputReference(navigationController);
 
         GameObject splatScene = new GameObject("GaussianSplatScene");
         splatScene.AddComponent<GaussianSplatSetup>();
@@ -71,7 +69,7 @@ public static class GsVrNavDemoSceneBuilder
         AssetDatabase.SaveAssets();
         AssetDatabase.Refresh();
 
-        Debug.Log($"GS-VR-Nav demo scene created at {ScenePath}. If moveInput is empty, assign XRI LeftHand Locomotion/Move manually.");
+        Debug.Log($"GS-VR-Nav demo scene created at {ScenePath}. Use mouse look and WASD for desktop navigation.");
     }
 
     private static GameObject InstantiatePrefabByNames(params string[] prefabNames)
@@ -105,53 +103,6 @@ public static class GsVrNavDemoSceneBuilder
             return instance;
         }
 
-        return null;
-    }
-
-    private static void AssignMoveInputReference(VRNavigationController navigationController)
-    {
-        InputActionReference moveReference = FindXriMoveInputReference();
-        if (moveReference != null)
-        {
-            AssignSerializedReference(navigationController, "moveInput", moveReference);
-        }
-    }
-
-    private static InputActionReference FindXriMoveInputReference()
-    {
-        string[] guids = AssetDatabase.FindAssets("XRI Default Input Actions t:InputActionAsset");
-        foreach (string guid in guids)
-        {
-            string path = AssetDatabase.GUIDToAssetPath(guid);
-            InputActionAsset asset = AssetDatabase.LoadAssetAtPath<InputActionAsset>(path);
-            if (asset == null)
-            {
-                continue;
-            }
-
-            InputAction action =
-                asset.FindAction("XRI LeftHand Locomotion/Move", false) ??
-                asset.FindAction("Move", false);
-
-            if (action == null)
-            {
-                continue;
-            }
-
-            string referencePath = "Assets/Settings/XRI_LeftHand_Move.asset";
-            Directory.CreateDirectory("Assets/Settings");
-
-            InputActionReference reference = AssetDatabase.LoadAssetAtPath<InputActionReference>(referencePath);
-            if (reference == null)
-            {
-                reference = InputActionReference.Create(action);
-                AssetDatabase.CreateAsset(reference, referencePath);
-            }
-
-            return reference;
-        }
-
-        Debug.LogWarning("XRI Default Input Actions asset was not found. Import XRI Starter Assets and assign moveInput manually.");
         return null;
     }
 

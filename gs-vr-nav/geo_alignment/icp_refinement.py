@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 from dataclasses import dataclass
@@ -45,6 +46,14 @@ class UnityMapAlignmentResult:
     rmse: float
     source_count: int
     target_count: int
+    input_ply: str = ""
+    input_ply_hash: str = ""
+    osm_json: str = ""
+    osm_json_hash: str = ""
+    origin_wgs84: dict[str, float] | None = None
+    alignment_mode: str = "map-to-scene"
+    accepted: bool = True
+    warnings: tuple[str, ...] = ()
 
 
 def require_open3d() -> Any:
@@ -130,6 +139,20 @@ def load_osm_building_boundary_points(
     if not sampled:
         raise ValueError(f"No building footprint boundary points found in {osm_json_path}")
     return np.vstack(sampled).astype(np.float32)
+
+
+def load_osm_origin_wgs84(osm_json_path: str | Path) -> dict[str, float]:
+    """Read canonical origin metadata from generated osm_data.json."""
+    payload = json.loads(Path(osm_json_path).read_text(encoding="utf-8"))
+    required = ("origin_lat", "origin_lon", "origin_alt")
+    missing = [key for key in required if key not in payload]
+    if missing:
+        raise ValueError(f"{osm_json_path} is missing canonical origin field(s): {', '.join(missing)}")
+    return {
+        "lat": float(payload["origin_lat"]),
+        "lon": float(payload["origin_lon"]),
+        "alt": float(payload["origin_alt"]),
+    }
 
 
 def iter_building_rings(buildings: Any) -> list[np.ndarray]:
@@ -354,6 +377,10 @@ def compute_map_to_scene_alignment(
     max_correspondence_distance_m: float = 15.0,
     max_target_points: int = 100_000,
     coarse_yaw_step_degrees: float = 15.0,
+    min_fitness: float = 0.6,
+    max_rmse_m: float = 3.0,
+    max_abs_yaw_degrees: float = 15.0,
+    translation_warning_m: float = 25.0,
 ) -> UnityMapAlignmentResult:
     """Align OSM/Blosm map geometry to the visible 3DGS scene and save Unity JSON."""
     positions = load_splat_positions(input_ply)
@@ -389,9 +416,76 @@ def compute_map_to_scene_alignment(
         rmse=rmse,
         source_count=int(source_xy.shape[0]),
         target_count=int(target_xy.shape[0]),
+        input_ply=str(Path(input_ply)),
+        input_ply_hash=sha256_file(input_ply),
+        osm_json=str(Path(osm_json)),
+        osm_json_hash=sha256_file(osm_json),
+        origin_wgs84=load_osm_origin_wgs84(osm_json),
+    )
+    accepted, warnings = evaluate_map_alignment_quality(
+        result,
+        min_fitness=min_fitness,
+        max_rmse_m=max_rmse_m,
+        max_abs_yaw_degrees=max_abs_yaw_degrees,
+        translation_warning_m=translation_warning_m,
+    )
+    result = UnityMapAlignmentResult(
+        transform=result.transform,
+        raw_icp_transform=result.raw_icp_transform,
+        yaw_rad=result.yaw_rad,
+        translation_xy=result.translation_xy,
+        unity_y_offset=result.unity_y_offset,
+        fitness=result.fitness,
+        rmse=result.rmse,
+        source_count=result.source_count,
+        target_count=result.target_count,
+        input_ply=result.input_ply,
+        input_ply_hash=result.input_ply_hash,
+        osm_json=result.osm_json,
+        osm_json_hash=result.osm_json_hash,
+        origin_wgs84=result.origin_wgs84,
+        alignment_mode=result.alignment_mode,
+        accepted=accepted,
+        warnings=tuple(warnings),
     )
     save_map_alignment_result(result, output_map_alignment)
     return result
+
+
+def sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def evaluate_map_alignment_quality(
+    result: UnityMapAlignmentResult,
+    *,
+    min_fitness: float = 0.6,
+    max_rmse_m: float = 3.0,
+    max_abs_yaw_degrees: float = 15.0,
+    translation_warning_m: float = 25.0,
+) -> tuple[bool, list[str]]:
+    """Apply quality gates to map-to-scene ICP output."""
+    warnings: list[str] = []
+    accepted = True
+    yaw_degrees = abs(math.degrees(result.yaw_rad))
+    translation_m = float(np.linalg.norm(result.translation_xy))
+
+    if result.fitness < float(min_fitness):
+        accepted = False
+        warnings.append(f"fitness {result.fitness:.4f} is below minimum {min_fitness:.4f}")
+    if result.rmse > float(max_rmse_m):
+        accepted = False
+        warnings.append(f"rmse {result.rmse:.3f} m exceeds maximum {max_rmse_m:.3f} m")
+    if yaw_degrees > float(max_abs_yaw_degrees):
+        accepted = False
+        warnings.append(f"abs(yaw) {yaw_degrees:.3f} deg exceeds maximum {max_abs_yaw_degrees:.3f} deg")
+    if translation_m > float(translation_warning_m):
+        warnings.append(f"translation {translation_m:.3f} m exceeds warning threshold {translation_warning_m:.3f} m")
+    return accepted, warnings
 
 
 def crop_target_to_source_bounds(target_xy: np.ndarray, source_xy: np.ndarray, *, margin_m: float) -> np.ndarray:
@@ -458,6 +552,13 @@ def _result_json_payload(result: IcpRefinementResult) -> dict[str, Any]:
 def _map_alignment_json_payload(result: UnityMapAlignmentResult) -> dict[str, Any]:
     return {
         "coordinate_space": "unity_xz",
+        "alignment_mode": result.alignment_mode,
+        "accepted": bool(result.accepted),
+        "origin_wgs84": result.origin_wgs84 or {},
+        "input_ply": result.input_ply,
+        "input_ply_hash": result.input_ply_hash,
+        "osm_json": result.osm_json,
+        "osm_json_hash": result.osm_json_hash,
         "position": {
             "x": float(result.translation_xy[0]),
             "y": result.unity_y_offset,
@@ -470,6 +571,7 @@ def _map_alignment_json_payload(result: UnityMapAlignmentResult) -> dict[str, An
         "source_count": result.source_count,
         "target_count": result.target_count,
         "source": "osm_buildings_to_splat_projection",
+        "warnings": list(result.warnings),
     }
 
 
@@ -513,6 +615,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-correspondence-distance", type=float, default=15.0)
     parser.add_argument("--max-source-points", type=int, default=100_000)
     parser.add_argument("--coarse-yaw-step", type=float, default=15.0)
+    parser.add_argument("--min-fitness", type=float, default=0.6)
+    parser.add_argument("--max-rmse", type=float, default=3.0)
+    parser.add_argument("--max-abs-yaw", type=float, default=15.0)
+    parser.add_argument("--translation-warning", type=float, default=25.0)
     return parser
 
 
@@ -533,14 +639,21 @@ def main(argv: list[str] | None = None) -> None:
             max_correspondence_distance_m=args.max_correspondence_distance,
             max_target_points=args.max_source_points,
             coarse_yaw_step_degrees=args.coarse_yaw_step,
+            min_fitness=args.min_fitness,
+            max_rmse_m=args.max_rmse,
+            max_abs_yaw_degrees=args.max_abs_yaw,
+            translation_warning_m=args.translation_warning,
         )
+        status = "accepted" if result.accepted else "rejected"
         print(
-            "Map-to-scene ICP complete: "
+            f"Map-to-scene ICP {status}: "
             f"unity_position=({result.translation_xy[0]:.3f}, {result.unity_y_offset:.3f}, {result.translation_xy[1]:.3f}) m, "
             f"unity_rotation_y={-math.degrees(result.yaw_rad):.3f} deg, "
             f"fitness={result.fitness:.4f}, rmse={result.rmse:.3f} m, "
             f"source={result.source_count}, target={result.target_count}"
         )
+        for warning in result.warnings:
+            print(f"  {warning}")
         return
 
     if args.output_ply is None:

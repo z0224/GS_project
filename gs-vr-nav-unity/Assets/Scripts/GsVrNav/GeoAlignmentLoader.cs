@@ -45,6 +45,27 @@ namespace GsVrNav.Unity
         [SerializeField]
         private float defaultMapYOffset = -1f;
 
+        [SerializeField]
+        private string expectedInputPlyHash = "";
+
+        [SerializeField]
+        private string expectedOsmJsonHash = "";
+
+        [SerializeField]
+        private bool validateExpectedOrigin = false;
+
+        [SerializeField]
+        private float expectedOriginLat = 0f;
+
+        [SerializeField]
+        private float expectedOriginLon = 0f;
+
+        [SerializeField]
+        private float expectedOriginAlt = 0f;
+
+        [SerializeField]
+        private float originValidationTolerance = 0.000001f;
+
         [Header("Blosm Navigation")]
         [SerializeField]
         private float walkableRaycastHeight = 20f;
@@ -89,23 +110,28 @@ namespace GsVrNav.Unity
             return TryFindWalkableSurface(new Vector2(x, z), out _);
         }
 
+        public bool TryGetWalkableSurface(float x, float z, out Vector3 hitPoint)
+        {
+            return TryFindWalkableSurface(new Vector2(x, z), out hitPoint);
+        }
+
         public Vector2 ClampToWalkable(float x, float z)
         {
             return FindSafeWalkablePoint(x, z);
         }
 
-        public Vector2 FindSafeWalkablePoint(float x, float z, float inwardDistance = 0.25f, float searchRadius = 2.0f)
+        public Vector3 FindSafeWalkableSurfacePoint(float x, float z, float inwardDistance = 0.25f, float searchRadius = 2.0f)
         {
             Vector2 point = new Vector2(x, z);
             if (TryFindWalkableSurface(point, out Vector3 hitPoint))
             {
-                return new Vector2(hitPoint.x, hitPoint.z);
+                return hitPoint;
             }
 
             float maxRadius = Mathf.Max(searchRadius, safePointSearchRadius, inwardDistance);
             float step = Mathf.Max(0.1f, safePointSearchStep);
             float bestDistanceSq = float.PositiveInfinity;
-            Vector2 bestPoint = point;
+            Vector3 bestPoint = new Vector3(x, 0f, z);
             bool found = false;
 
             for (float radius = step; radius <= maxRadius + 0.001f; radius += step)
@@ -125,7 +151,7 @@ namespace GsVrNav.Unity
                     if (distanceSq < bestDistanceSq)
                     {
                         bestDistanceSq = distanceSq;
-                        bestPoint = candidate2D;
+                        bestPoint = candidateHit;
                         found = true;
                     }
                 }
@@ -136,7 +162,13 @@ namespace GsVrNav.Unity
                 }
             }
 
-            return point;
+            return bestPoint;
+        }
+
+        public Vector2 FindSafeWalkablePoint(float x, float z, float inwardDistance = 0.25f, float searchRadius = 2.0f)
+        {
+            Vector3 point = FindSafeWalkableSurfacePoint(x, z, inwardDistance, searchRadius);
+            return new Vector2(point.x, point.z);
         }
 
         public Vector2 ClampMovement(Vector2 from, Vector2 to)
@@ -167,6 +199,38 @@ namespace GsVrNav.Unity
             }
 
             return low;
+        }
+
+        public Vector3 ClampMovementToSurface(Vector3 from, Vector3 to)
+        {
+            if (TryGetWalkableSurface(to.x, to.z, out Vector3 targetSurface))
+            {
+                return targetSurface;
+            }
+
+            if (!TryGetWalkableSurface(from.x, from.z, out Vector3 fromSurface))
+            {
+                return FindSafeWalkableSurfacePoint(to.x, to.z);
+            }
+
+            Vector2 low = new Vector2(from.x, from.z);
+            Vector2 high = new Vector2(to.x, to.z);
+            Vector3 lowSurface = fromSurface;
+            for (int i = 0; i < 8; i++)
+            {
+                Vector2 mid = Vector2.Lerp(low, high, 0.5f);
+                if (TryFindWalkableSurface(mid, out Vector3 midSurface))
+                {
+                    low = mid;
+                    lowSurface = midSurface;
+                }
+                else
+                {
+                    high = mid;
+                }
+            }
+
+            return lowSurface;
         }
 
         [ContextMenu("Generate Blosm Map Asset")]
@@ -304,9 +368,12 @@ namespace GsVrNav.Unity
                 return;
             }
 
-            if (!string.IsNullOrWhiteSpace(alignment.coordinate_space) && alignment.coordinate_space != "unity_xz")
+            if (!IsMapAlignmentSafeToApply(alignment, alignmentPath))
             {
-                Debug.LogWarning($"Map alignment JSON uses coordinate_space '{alignment.coordinate_space}', expected 'unity_xz'.");
+                root.localPosition = Vector3.zero;
+                root.localRotation = Quaternion.identity;
+                root.localScale = Vector3.one;
+                return;
             }
 
             float scale = Mathf.Approximately(alignment.scale, 0f) ? 1f : alignment.scale;
@@ -324,6 +391,65 @@ namespace GsVrNav.Unity
                 $"position=({position.x:F3}, {position.y:F3}, {position.z:F3}), " +
                 $"rotationY={alignment.rotation_y_deg:F3}, scale={scale:F3}, " +
                 $"fitness={alignment.fitness:F4}, rmse={alignment.rmse:F3}");
+        }
+
+        private bool IsMapAlignmentSafeToApply(MapAlignmentJson alignment, string alignmentPath)
+        {
+            if (!alignment.accepted)
+            {
+                Debug.LogWarning($"Map alignment JSON at {alignmentPath} is not accepted; Blosm map geometry will use identity alignment.");
+                return false;
+            }
+
+            if (alignment.coordinate_space != "unity_xz")
+            {
+                Debug.LogWarning($"Map alignment JSON at {alignmentPath} uses coordinate_space '{alignment.coordinate_space}', expected 'unity_xz'; identity alignment will be used.");
+                return false;
+            }
+
+            if (alignment.alignment_mode != "map-to-scene")
+            {
+                Debug.LogWarning($"Map alignment JSON at {alignmentPath} uses alignment_mode '{alignment.alignment_mode}', expected 'map-to-scene'; identity alignment will be used.");
+                return false;
+            }
+
+            if (alignment.origin_wgs84 == null)
+            {
+                Debug.LogWarning($"Map alignment JSON at {alignmentPath} has no origin_wgs84 metadata; identity alignment will be used.");
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(expectedInputPlyHash) && !string.Equals(expectedInputPlyHash, alignment.input_ply_hash, StringComparison.OrdinalIgnoreCase))
+            {
+                Debug.LogWarning($"Map alignment JSON at {alignmentPath} input_ply_hash does not match the expected hash; identity alignment will be used.");
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(expectedOsmJsonHash) && !string.Equals(expectedOsmJsonHash, alignment.osm_json_hash, StringComparison.OrdinalIgnoreCase))
+            {
+                Debug.LogWarning($"Map alignment JSON at {alignmentPath} osm_json_hash does not match the expected hash; identity alignment will be used.");
+                return false;
+            }
+
+            if (validateExpectedOrigin && !ApproximatelyOrigin(alignment.origin_wgs84))
+            {
+                Debug.LogWarning($"Map alignment JSON at {alignmentPath} origin_wgs84 does not match the expected origin; identity alignment will be used.");
+                return false;
+            }
+
+            if (alignment.warnings != null && alignment.warnings.Length > 0)
+            {
+                Debug.LogWarning($"Map alignment JSON at {alignmentPath} includes warnings: {string.Join("; ", alignment.warnings)}");
+            }
+
+            return true;
+        }
+
+        private bool ApproximatelyOrigin(MapAlignmentOrigin origin)
+        {
+            return Mathf.Abs(origin.lat - expectedOriginLat) <= originValidationTolerance
+                && Mathf.Abs(origin.lon - expectedOriginLon) <= originValidationTolerance
+                && Mathf.Abs(origin.alt - expectedOriginAlt) <= Mathf.Max(0.01f, originValidationTolerance);
         }
 
         [ContextMenu("Toggle Blosm Map Geometry")]
@@ -560,6 +686,13 @@ namespace GsVrNav.Unity
         private sealed class MapAlignmentJson
         {
             public string coordinate_space;
+            public string alignment_mode;
+            public bool accepted;
+            public MapAlignmentOrigin origin_wgs84;
+            public string input_ply;
+            public string input_ply_hash;
+            public string osm_json;
+            public string osm_json_hash;
             public MapAlignmentPosition position;
             public float rotation_y_deg;
             public float scale = 1f;
@@ -568,6 +701,15 @@ namespace GsVrNav.Unity
             public int source_count;
             public int target_count;
             public string source;
+            public string[] warnings;
+        }
+
+        [Serializable]
+        private sealed class MapAlignmentOrigin
+        {
+            public float lat;
+            public float lon;
+            public float alt;
         }
 
         [Serializable]

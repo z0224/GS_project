@@ -1,11 +1,15 @@
 {
   "coordinate_space": "unity_xz",
-  "position": { "x": 23.2, "y": -1.0, "z": -15.8 },
-  "rotation_y_deg": -167.0,
+  "position": {
+    "x": 27.310032333058313,
+    "y": -1.0,
+    "z": 51.56336118682995
+  },
+  "rotation_y_deg": -76.23854940409636,
   "scale": 1.0,
-  "fitness": 1.0,
-  "rmse": 0.0,
-  "source_count": 0,
-  "target_count": 0,
-  "source": "manual_calibration"
+  "fitness": 0.4028255059182894,
+  "rmse": 6.898583797764581,
+  "source_count": 2619,
+  "target_count": 2798,
+  "source": "osm_buildings_to_splat_projection"
 }

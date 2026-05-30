@@ -8,6 +8,7 @@ from geo_alignment import icp_refinement
 from geo_alignment.icp_refinement import (
     compute_map_to_scene_alignment,
     constrain_to_yaw_xy,
+    evaluate_map_alignment_quality,
     extract_building_projection_points,
     initial_yaw_translation_transform,
     iter_building_rings,
@@ -170,7 +171,14 @@ def test_refine_scene_with_icp_writes_refined_ply_and_transform(tmp_path, monkey
     output_ply = tmp_path / "refined_scene.ply"
     output_transform = tmp_path / "icp_refinement.npz"
     osm_path.write_text(
-        json.dumps({"buildings": [[[0, 0], [10, 0], [10, 10], [0, 10]]]}),
+        json.dumps(
+            {
+                "origin_lat": -27.5,
+                "origin_lon": 153.1,
+                "origin_alt": 42.0,
+                "buildings": [[[0, 0], [10, 0], [10, 10], [0, 10]]],
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -214,7 +222,7 @@ def test_compute_map_to_scene_alignment_writes_unity_json(tmp_path, monkeypatch)
     )
 
     raw = np.eye(4, dtype=float)
-    raw[:3, :3] = _rotation_z(math.radians(25.0))
+    raw[:3, :3] = _rotation_z(math.radians(10.0))
     raw[:2, 3] = [23.2, -15.8]
 
     def fake_icp(source_xy, target_xy, *, max_correspondence_distance_m, yaw_step_degrees):
@@ -236,11 +244,38 @@ def test_compute_map_to_scene_alignment_writes_unity_json(tmp_path, monkeypatch)
 
     payload = json.loads(output_json.read_text(encoding="utf-8"))
     assert payload["coordinate_space"] == "unity_xz"
+    assert payload["alignment_mode"] == "map-to-scene"
+    assert payload["accepted"] is True
+    assert payload["origin_wgs84"] == {"lat": -27.5, "lon": 153.1, "alt": 42.0}
+    assert len(payload["input_ply_hash"]) == 64
+    assert len(payload["osm_json_hash"]) == 64
     assert payload["position"] == pytest.approx({"x": 23.2, "y": -1.0, "z": -15.8})
-    assert payload["rotation_y_deg"] == pytest.approx(-25.0)
+    assert payload["rotation_y_deg"] == pytest.approx(-10.0)
     assert payload["scale"] == pytest.approx(1.0)
     assert payload["fitness"] == pytest.approx(0.72)
     assert payload["rmse"] == pytest.approx(1.34)
     assert payload["source"] == "osm_buildings_to_splat_projection"
+    assert payload["warnings"]
     assert result.source_count > 0
     assert result.target_count > 0
+
+
+def test_map_alignment_quality_rejects_bad_icp_metrics() -> None:
+    result = icp_refinement.UnityMapAlignmentResult(
+        transform=np.eye(4),
+        raw_icp_transform=np.eye(4),
+        yaw_rad=math.radians(20.0),
+        translation_xy=np.array([3.0, 4.0]),
+        unity_y_offset=-1.0,
+        fitness=0.4,
+        rmse=4.5,
+        source_count=10,
+        target_count=12,
+    )
+
+    accepted, warnings = evaluate_map_alignment_quality(result)
+
+    assert accepted is False
+    assert any("fitness" in warning for warning in warnings)
+    assert any("rmse" in warning for warning in warnings)
+    assert any("yaw" in warning for warning in warnings)

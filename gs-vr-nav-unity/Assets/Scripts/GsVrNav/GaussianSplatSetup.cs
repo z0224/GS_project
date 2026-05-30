@@ -64,6 +64,18 @@ namespace GsVrNav.Unity
         [SerializeField]
         private bool applyENUToUnityRotation = true;
 
+        [SerializeField]
+        private bool useManualTransformCorrection = false;
+
+        [SerializeField]
+        private Vector3 manualPosition = Vector3.zero;
+
+        [SerializeField]
+        private Vector3 manualEulerAngles = Vector3.zero;
+
+        [SerializeField]
+        private Vector3 manualScale = Vector3.one;
+
         [Header("Editor Performance")]
         [SerializeField]
         private bool showPerformanceStats = true;
@@ -81,7 +93,13 @@ namespace GsVrNav.Unity
 
         private void Start()
         {
-            if (applyENUToUnityRotation)
+            if (useManualTransformCorrection)
+            {
+                transform.localPosition = manualPosition;
+                transform.localRotation = Quaternion.Euler(manualEulerAngles);
+                transform.localScale = manualScale;
+            }
+            else if (applyENUToUnityRotation)
             {
                 // ENU: X=East, Y=North, Z=Up → Unity: X=East, Y=Up, Z=North。
                 // 绕 X 轴旋转 -90° 将 ENU.Up(Z) 映射到 Unity.Up(Y)，并让 ENU.North(Y) 落到 Unity.Forward(Z)。
@@ -89,14 +107,14 @@ namespace GsVrNav.Unity
                 // EN: Python ENU is (East, North, Up), while Unity uses (X, Y, Z)=(Right, Up, Forward).
                 transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
                 transform.localScale = new Vector3(1f, 1f, -1f);
+                transform.localPosition = Vector3.zero;
             }
             else
             {
                 transform.localRotation = Quaternion.identity;
                 transform.localScale = Vector3.one;
+                transform.localPosition = Vector3.zero;
             }
-
-            transform.localPosition = Vector3.zero;
 
             ConfigureRendererBestEffort();
         }

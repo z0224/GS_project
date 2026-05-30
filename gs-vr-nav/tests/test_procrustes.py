@@ -11,6 +11,7 @@ from geo_alignment.procrustes import (
     AlignmentResult,
     compute_anchor_pairs,
     quat_to_rotation_matrix,
+    robust_umeyama_alignment,
     umeyama_alignment,
 )
 
@@ -209,6 +210,37 @@ def test_alignment_result_save_load(tmp_path) -> None:
     np.testing.assert_allclose(loaded["residuals"], result.residuals)
     np.testing.assert_allclose(loaded["anchor_source"], result.anchor_source)
     np.testing.assert_allclose(loaded["anchor_target"], result.anchor_target)
+    np.testing.assert_allclose(loaded["inlier_mask"], np.ones(3, dtype=bool))
+
+
+def test_robust_umeyama_rejects_large_outlier_and_writes_reports(tmp_path) -> None:
+    source = _random_points(20)
+    true_scale = 2.0
+    true_rotation = _rotation_z(math.radians(12.0))
+    true_translation = np.array([5.0, -3.0, 1.0])
+    target = true_scale * (source @ true_rotation.T) + true_translation
+    target[-1] += np.array([30.0, 0.0, 0.0])
+
+    transform, info = robust_umeyama_alignment(source, target, ransac_threshold_m=2.0, ransac_iterations=300)
+    result = AlignmentResult(
+        transform=transform,
+        rotation=info["rotation"],
+        scale=info["scale"],
+        translation=info["translation"],
+        rmse=info["rmse"],
+        residuals=info["residuals"],
+        num_anchors=info["num_anchors"],
+        anchor_source=source,
+        anchor_target=target,
+        inlier_mask=info["inlier_mask"],
+    )
+    result.write_quality_reports(tmp_path)
+
+    assert bool(info["inlier_mask"][-1]) is False
+    assert info["rmse"] < 1e-5
+    assert info["residuals"][-1] > 25.0
+    assert (tmp_path / "alignment_report.json").exists()
+    assert (tmp_path / "alignment_report.csv").exists()
 
 
 def test_compute_anchor_pairs() -> None:

@@ -26,6 +26,10 @@ captures/
 outputs/
 gs-vr-nav-unity/Assets/StreamingAssets/SplatScenes/*.ply
 
+# submission/report artifacts
+poster/
+s4920049.pdf
+
 # nested external repo
 external/
 

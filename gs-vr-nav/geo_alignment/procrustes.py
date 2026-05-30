@@ -1,21 +1,9 @@
-"""
-Umeyama similarity alignment from COLMAP reconstruction coordinates to ENU.
-
-COLMAP reconstructs an arbitrary coordinate system: scale, orientation, and
-origin are not tied to the real world. Given anchor frames that have both a
-COLMAP camera center and a GPS-derived ENU coordinate, this module estimates
-the 4x4 similarity transform:
-
-    T = | s * R   t |
-        |   0     1 |
-
-where ``s`` is a uniform scale, ``R`` is a proper 3D rotation, and ``t`` is a
-translation vector in meters.
-"""
+"""Umeyama similarity alignment from COLMAP reconstruction coordinates to ENU."""
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import struct
 from dataclasses import dataclass
@@ -47,11 +35,8 @@ def umeyama_alignment(
     if n < 3:
         raise ValueError("At least 3 anchor points are required for 3D similarity alignment")
 
-    # CN: Umeyama 方法先把两组点移到各自中心，再用 SVD 求最佳旋转/尺度/平移。
-    # EN: Umeyama alignment centers both point sets, then uses SVD for optimal rotation/scale/translation.
     mu_s = source.mean(axis=0)
     mu_t = target.mean(axis=0)
-
     src_centered = source - mu_s
     tgt_centered = target - mu_t
 
@@ -61,18 +46,12 @@ def umeyama_alignment(
 
     cov = (tgt_centered.T @ src_centered) / n
     u, d_values, vt = np.linalg.svd(cov)
-
     determinant_product = np.linalg.det(u) * np.linalg.det(vt)
     sign = 1.0 if determinant_product >= 0.0 else -1.0
     s_matrix = np.diag([1.0, 1.0, sign])
 
     rotation = u @ s_matrix @ vt
-
-    if with_scale:
-        scale = float(np.trace(np.diag(d_values) @ s_matrix) / var_s)
-    else:
-        scale = 1.0
-
+    scale = float(np.trace(np.diag(d_values) @ s_matrix) / var_s) if with_scale else 1.0
     translation = mu_t - scale * rotation @ mu_s
 
     transform = np.eye(4, dtype=float)
@@ -82,8 +61,7 @@ def umeyama_alignment(
     transformed = (scale * (source @ rotation.T)) + translation
     residuals = np.linalg.norm(transformed - target, axis=1)
     rmse = float(np.sqrt(np.mean(residuals**2)))
-
-    info = {
+    return transform, {
         "rotation": rotation,
         "scale": scale,
         "translation": translation,
@@ -91,7 +69,6 @@ def umeyama_alignment(
         "residuals": residuals,
         "num_anchors": n,
     }
-    return transform, info
 
 
 def quat_to_rotation_matrix(qvec: np.ndarray) -> np.ndarray:
@@ -147,7 +124,6 @@ def read_colmap_images_binary(path: str | Path) -> dict:
             qvec = np.array(unpacked[1:5], dtype=float)
             tvec = np.array(unpacked[5:8], dtype=float)
             camera_id = int(unpacked[8])
-
             image_name = _read_null_terminated_string(handle)
 
             num_points_data = handle.read(8)
@@ -219,9 +195,6 @@ def compute_anchor_pairs(
     """Extract corresponding COLMAP camera centers and ENU coordinates."""
     source_points = []
     target_points = []
-
-    # CN: 同一张图片在 transforms.json 中有 GPS/ENU，在 COLMAP images.bin 中有重建相机中心。
-    # EN: The same image has GPS/ENU in transforms.json and a reconstructed camera center in images.bin.
     for frame in transforms_json.get("frames", []):
         if not isinstance(frame, dict):
             continue
@@ -241,6 +214,90 @@ def compute_anchor_pairs(
     return np.asarray(source_points, dtype=float).reshape(-1, 3), np.asarray(target_points, dtype=float).reshape(-1, 3)
 
 
+def canonical_origin_from_transforms_payload(transforms_json: dict, source_path: str | Path) -> dict[str, float]:
+    """Read required canonical origin metadata from transforms.json payload."""
+    required = ("origin_lat", "origin_lon", "origin_alt")
+    missing = [key for key in required if key not in transforms_json]
+    if missing:
+        raise ValueError(f"{source_path} is missing canonical origin field(s): {', '.join(missing)}")
+    return {
+        "lat": float(transforms_json["origin_lat"]),
+        "lon": float(transforms_json["origin_lon"]),
+        "alt": float(transforms_json["origin_alt"]),
+    }
+
+
+def _transform_points(points: np.ndarray, transform: np.ndarray) -> np.ndarray:
+    points = _as_points(points, "points")
+    return points @ transform[:3, :3].T + transform[:3, 3]
+
+
+def robust_umeyama_alignment(
+    source: np.ndarray,
+    target: np.ndarray,
+    *,
+    with_scale: bool = True,
+    ransac_threshold_m: float = 5.0,
+    ransac_iterations: int = 500,
+    random_seed: int = 42,
+) -> tuple[np.ndarray, dict]:
+    """Estimate Umeyama alignment after deterministic RANSAC outlier rejection."""
+    source = _as_points(source, "source")
+    target = _as_points(target, "target")
+    if source.shape != target.shape:
+        raise ValueError(f"source and target must have the same shape, got {source.shape} and {target.shape}")
+    if source.shape[0] < 3:
+        raise ValueError("At least 3 anchor points are required for robust alignment")
+
+    count = source.shape[0]
+    rng = np.random.default_rng(random_seed)
+    threshold = float(ransac_threshold_m)
+    best_mask: np.ndarray | None = None
+    best_count = -1
+    best_rmse = float("inf")
+
+    for _ in range(max(1, int(ransac_iterations))):
+        sample = rng.choice(count, size=3, replace=False)
+        try:
+            sample_transform, _sample_info = umeyama_alignment(source[sample], target[sample], with_scale=with_scale)
+        except ValueError:
+            continue
+        residuals = np.linalg.norm(_transform_points(source, sample_transform) - target, axis=1)
+        mask = residuals <= threshold
+        inlier_count = int(np.count_nonzero(mask))
+        if inlier_count < 3:
+            continue
+        rmse = float(np.sqrt(np.mean(residuals[mask] ** 2)))
+        if inlier_count > best_count or (inlier_count == best_count and rmse < best_rmse):
+            best_mask = mask
+            best_count = inlier_count
+            best_rmse = rmse
+
+    if best_mask is None:
+        best_mask = np.ones(count, dtype=bool)
+
+    transform, info = umeyama_alignment(source[best_mask], target[best_mask], with_scale=with_scale)
+    all_residuals = np.linalg.norm(_transform_points(source, transform) - target, axis=1)
+    inlier_residuals = all_residuals[best_mask]
+    info["residuals"] = all_residuals
+    info["rmse"] = float(np.sqrt(np.mean(inlier_residuals**2)))
+    info["num_anchors"] = count
+    info["inlier_mask"] = best_mask
+    return transform, info
+
+
+def alignment_quality(rmse: float, residuals: np.ndarray) -> tuple[str, str]:
+    """Return quality status and an actionable message for alignment metrics."""
+    max_residual = float(np.max(residuals))
+    if rmse > 5.0:
+        return "fail", "FAIL: RMSE > 5 m. Do not use this alignment; inspect GPS anchors and remove bad frames."
+    if rmse >= 3.0:
+        return "warning", "WARNING: RMSE is 3-5 m. Use only for preview and inspect high-residual anchors."
+    if max_residual > 10.0:
+        return "warning", "WARNING: Max residual is large; inspect the highest-residual GPS frame even though RMSE passed."
+    return "pass", "PASS: Alignment quality is within the default threshold."
+
+
 @dataclass
 class AlignmentResult:
     """Full output of the GPS-to-scene Procrustes alignment pipeline."""
@@ -254,31 +311,36 @@ class AlignmentResult:
     num_anchors: int
     anchor_source: np.ndarray
     anchor_target: np.ndarray
+    inlier_mask: np.ndarray | None = None
+    quality_status: str = "pass"
+    quality_message: str = ""
+    origin_wgs84: dict[str, float] | None = None
 
     def report(self) -> str:
         """Generate a human-readable alignment report."""
+        inlier_mask = self._resolved_inlier_mask()
         lines = [
             "=" * 60,
             "GS-VR-Nav Alignment Report",
             "=" * 60,
             f"Anchor points used: {self.num_anchors}",
+            f"Inliers: {int(np.count_nonzero(inlier_mask))}",
+            f"Outliers: {int(np.count_nonzero(~inlier_mask))}",
             f"Scale factor: {self.scale:.6f}",
             f"RMSE: {self.rmse:.3f} m",
             f"Max residual: {np.max(self.residuals):.3f} m",
             f"Min residual: {np.min(self.residuals):.3f} m",
             f"Mean residual: {np.mean(self.residuals):.3f} m",
+            f"Quality: {self.quality_status}",
+            f"Origin WGS84: {self.origin_wgs84}" if self.origin_wgs84 is not None else "Origin WGS84: unavailable",
             "",
             "Per-anchor residuals:",
         ]
-        for i, residual in enumerate(self.residuals):
-            lines.append(f"  Anchor {i}: {residual:.3f} m")
+        for index, residual in enumerate(self.residuals):
+            state = "inlier" if bool(inlier_mask[index]) else "outlier"
+            lines.append(f"  Anchor {index}: {residual:.3f} m ({state})")
         lines.append("=" * 60)
-        if self.rmse > 5.0:
-            lines.append("⚠️  WARNING: RMSE > 5m — 对齐质量较差，请检查GPS精度或增加锚点。")
-        elif self.rmse > 2.0:
-            lines.append("⚠️  NOTICE: RMSE 2-5m — 对齐质量一般，可能影响导航精度。")
-        else:
-            lines.append("✅  对齐质量良好（RMSE < 2m）。")
+        lines.append(self.quality_message or alignment_quality(self.rmse, self.residuals)[1])
         return "\n".join(lines)
 
     def save(self, path: str | Path) -> None:
@@ -292,25 +354,119 @@ class AlignmentResult:
             residuals=self.residuals,
             anchor_source=self.anchor_source,
             anchor_target=self.anchor_target,
+            inlier_mask=self._resolved_inlier_mask(),
+            origin_wgs84=(
+                np.array(
+                    [self.origin_wgs84["lat"], self.origin_wgs84["lon"], self.origin_wgs84["alt"]],
+                    dtype=float,
+                )
+                if self.origin_wgs84 is not None
+                else np.empty((0,), dtype=float)
+            ),
         )
+
+    def write_quality_reports(self, output_dir: str | Path) -> None:
+        """Write JSON and CSV residual reports next to alignment.npz."""
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        inlier_mask = self._resolved_inlier_mask()
+        anchors = [
+            {
+                "index": int(index),
+                "residual_m": float(residual),
+                "status": "inlier" if bool(inlier_mask[index]) else "outlier",
+                "source": self.anchor_source[index].astype(float).tolist(),
+                "target": self.anchor_target[index].astype(float).tolist(),
+            }
+            for index, residual in enumerate(self.residuals)
+        ]
+        payload = {
+            "quality_status": self.quality_status,
+            "quality_message": self.quality_message,
+            "rmse_m": float(self.rmse),
+            "mean_residual_m": float(np.mean(self.residuals)),
+            "max_residual_m": float(np.max(self.residuals)),
+            "min_residual_m": float(np.min(self.residuals)),
+            "num_anchors": int(self.num_anchors),
+            "inlier_count": int(np.count_nonzero(inlier_mask)),
+            "outlier_count": int(np.count_nonzero(~inlier_mask)),
+            "scale": float(self.scale),
+            "translation": self.translation.astype(float).tolist(),
+            "origin_wgs84": self.origin_wgs84,
+            "anchors": anchors,
+        }
+        (output_path / "alignment_report.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+        with (output_path / "alignment_report.csv").open("w", newline="", encoding="utf-8") as handle:
+            fieldnames = (
+                "index",
+                "residual_m",
+                "status",
+                "source_x",
+                "source_y",
+                "source_z",
+                "target_e",
+                "target_n",
+                "target_u",
+            )
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for anchor in anchors:
+                source = anchor["source"]
+                target = anchor["target"]
+                writer.writerow(
+                    {
+                        "index": anchor["index"],
+                        "residual_m": anchor["residual_m"],
+                        "status": anchor["status"],
+                        "source_x": source[0],
+                        "source_y": source[1],
+                        "source_z": source[2],
+                        "target_e": target[0],
+                        "target_n": target[1],
+                        "target_u": target[2],
+                    }
+                )
+
+    def _resolved_inlier_mask(self) -> np.ndarray:
+        if self.inlier_mask is None:
+            return np.ones(self.num_anchors, dtype=bool)
+        mask = np.asarray(self.inlier_mask, dtype=bool)
+        if mask.shape != (self.num_anchors,):
+            raise ValueError(f"inlier_mask must have shape ({self.num_anchors},), got {mask.shape}")
+        return mask
 
 
 def align_pipeline(
     transforms_json_path: str | Path,
     colmap_images_bin_path: str | Path,
     output_dir: str | Path | None = None,
+    *,
+    robust: bool = True,
+    ransac_threshold_m: float = 5.0,
+    ransac_iterations: int = 500,
 ) -> AlignmentResult:
     """Run the end-to-end COLMAP-to-ENU alignment pipeline."""
     transforms_path = Path(transforms_json_path)
     with transforms_path.open("r", encoding="utf-8") as handle:
         transforms_json = json.load(handle)
+    origin_wgs84 = canonical_origin_from_transforms_payload(transforms_json, transforms_path)
 
     colmap_images = read_colmap_images_binary(colmap_images_bin_path)
-    # CN: source 是 COLMAP 任意坐标，target 是真实 ENU 米制坐标。
-    # EN: source is COLMAP's arbitrary coordinate frame; target is the real-world ENU metric frame.
     source, target = compute_anchor_pairs(transforms_json, colmap_images)
-    transform, info = umeyama_alignment(source, target, with_scale=True)
+    if robust:
+        transform, info = robust_umeyama_alignment(
+            source,
+            target,
+            with_scale=True,
+            ransac_threshold_m=ransac_threshold_m,
+            ransac_iterations=ransac_iterations,
+        )
+    else:
+        transform, info = umeyama_alignment(source, target, with_scale=True)
+        info["inlier_mask"] = np.ones(source.shape[0], dtype=bool)
 
+    quality_status, quality_message = alignment_quality(info["rmse"], info["residuals"])
     result = AlignmentResult(
         transform=transform,
         rotation=info["rotation"],
@@ -321,6 +477,10 @@ def align_pipeline(
         num_anchors=info["num_anchors"],
         anchor_source=source,
         anchor_target=target,
+        inlier_mask=info["inlier_mask"],
+        quality_status=quality_status,
+        quality_message=quality_message,
+        origin_wgs84=origin_wgs84,
     )
 
     print(result.report())
@@ -329,13 +489,9 @@ def align_pipeline(
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         result.save(output_path / "alignment.npz")
+        result.write_quality_reports(output_path)
 
     return result
-
-
-def _transform_points(points: np.ndarray, transform: np.ndarray) -> np.ndarray:
-    points = _as_points(points, "points")
-    return points @ transform[:3, :3].T + transform[:3, 3]
 
 
 def visualize_alignment(
@@ -346,7 +502,6 @@ def visualize_alignment(
     import matplotlib.pyplot as plt
 
     transformed_source = _transform_points(result.anchor_source, result.transform)
-
     fig = plt.figure(figsize=(14, 10))
     fig.suptitle("Procrustes Alignment Result", fontsize=16)
 
@@ -368,7 +523,7 @@ def visualize_alignment(
     anchor_indices = np.arange(result.num_anchors)
     ax_residual.bar(anchor_indices, result.residuals, color="0.35")
     ax_residual.axhline(result.rmse, color="tab:red", linestyle="-", label=f"RMSE {result.rmse:.2f} m")
-    ax_residual.axhline(2.0, color="goldenrod", linestyle="--", label="2 m")
+    ax_residual.axhline(3.0, color="goldenrod", linestyle="--", label="3 m")
     ax_residual.axhline(5.0, color="red", linestyle="--", label="5 m")
     ax_residual.set_xlabel("Anchor")
     ax_residual.set_ylabel("Residual (m)")
@@ -378,20 +533,8 @@ def visualize_alignment(
     ax_residual.legend()
 
     ax_3d = fig.add_subplot(2, 2, 3, projection="3d")
-    ax_3d.scatter(
-        result.anchor_target[:, 0],
-        result.anchor_target[:, 1],
-        result.anchor_target[:, 2],
-        c="tab:blue",
-        label="ENU target",
-    )
-    ax_3d.scatter(
-        transformed_source[:, 0],
-        transformed_source[:, 1],
-        transformed_source[:, 2],
-        c="tab:red",
-        label="Aligned COLMAP",
-    )
+    ax_3d.scatter(result.anchor_target[:, 0], result.anchor_target[:, 1], result.anchor_target[:, 2], c="tab:blue", label="ENU target")
+    ax_3d.scatter(transformed_source[:, 0], transformed_source[:, 1], transformed_source[:, 2], c="tab:red", label="Aligned COLMAP")
     for target, source in zip(result.anchor_target, transformed_source):
         ax_3d.plot([target[0], source[0]], [target[1], source[1]], [target[2], source[2]], color="0.6")
     ax_3d.set_xlabel("East (m)")
@@ -461,9 +604,19 @@ def _main() -> None:
     parser.add_argument("colmap_images_bin", help="Path to COLMAP images.bin")
     parser.add_argument("--output-dir", "-o", default=None, help="Output directory for alignment results")
     parser.add_argument("--visualize", "-v", action="store_true", help="Show alignment visualization")
+    parser.add_argument("--no-robust", action="store_true", help="Disable default RANSAC outlier rejection")
+    parser.add_argument("--ransac-threshold", type=float, default=5.0, help="RANSAC inlier threshold in meters")
+    parser.add_argument("--ransac-iterations", type=int, default=500, help="RANSAC iteration count")
     args = parser.parse_args()
 
-    result = align_pipeline(args.transforms_json, args.colmap_images_bin, args.output_dir)
+    result = align_pipeline(
+        args.transforms_json,
+        args.colmap_images_bin,
+        args.output_dir,
+        robust=not args.no_robust,
+        ransac_threshold_m=args.ransac_threshold,
+        ransac_iterations=args.ransac_iterations,
+    )
     if args.visualize:
         visualize_alignment(result)
 
