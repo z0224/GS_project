@@ -13,16 +13,16 @@ MonoBehaviour:
   m_Name: aligned_scene
   m_EditorClassIdentifier: GaussianSplatting::GaussianSplatting.Runtime.GaussianSplatAsset
   m_FormatVersion: 20231020
-  m_SplatCount: 552536
-  m_BoundsMin: {x: -33.213474, y: -108.87391, z: -63.2}
-  m_BoundsMax: {x: 140.15385, y: 34.886383, z: 61.00121}
+  m_SplatCount: 4462469
+  m_BoundsMin: {x: -57.459167, y: -5.532753, z: -92.08766}
+  m_BoundsMax: {x: 106.74724, y: 134.867, z: 91.75231}
   m_DataHash:
     serializedVersion: 2
-    Hash: 10c0981c99d17a5ab571fffbda848567
-  m_PosFormat: 1
-  m_ScaleFormat: 1
-  m_SHFormat: 2
-  m_ColorFormat: 1
+    Hash: 9e4b03b9ea8822070df54c360bcc1080
+  m_PosFormat: 2
+  m_ScaleFormat: 2
+  m_SHFormat: 3
+  m_ColorFormat: 2
   m_PosData: {fileID: 4900000, guid: cd129abb58bc0b34693a4fb1d83cde6f, type: 3}
   m_ColorData: {fileID: 4900000, guid: 285caa68e20dfef4891727279afa8575, type: 3}
   m_OtherData: {fileID: 4900000, guid: 1b6a1d55c735a8941967afbe38f207db, type: 3}
