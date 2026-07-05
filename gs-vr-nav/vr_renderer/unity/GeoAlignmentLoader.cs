@@ -407,9 +407,9 @@ namespace GsVrNav.Unity
                 return false;
             }
 
-            if (alignment.alignment_mode != "map-to-scene")
+            if (!IsSupportedAlignmentMode(alignment.alignment_mode))
             {
-                Debug.LogWarning($"Map alignment JSON at {alignmentPath} uses alignment_mode '{alignment.alignment_mode}', expected 'map-to-scene'; identity alignment will be used.");
+                Debug.LogWarning($"Map alignment JSON at {alignmentPath} uses alignment_mode '{alignment.alignment_mode}', expected 'map-to-scene' or 'manual-map-to-scene'; identity alignment will be used.");
                 return false;
             }
 
@@ -443,6 +443,11 @@ namespace GsVrNav.Unity
             }
 
             return true;
+        }
+
+        private static bool IsSupportedAlignmentMode(string alignmentMode)
+        {
+            return alignmentMode == "map-to-scene" || alignmentMode == "manual-map-to-scene";
         }
 
         private bool ApproximatelyOrigin(MapAlignmentOrigin origin)

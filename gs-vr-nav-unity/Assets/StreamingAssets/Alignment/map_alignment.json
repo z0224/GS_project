@@ -1,15 +1,29 @@
 {
   "coordinate_space": "unity_xz",
-  "position": {
-    "x": 27.310032333058313,
-    "y": -1.0,
-    "z": 51.56336118682995
+  "alignment_mode": "manual-map-to-scene",
+  "accepted": true,
+  "origin_wgs84": {
+    "lat": -27.49981819,
+    "lon": 153.01459917,
+    "alt": 63.53333333333333
   },
-  "rotation_y_deg": -76.23854940409636,
+  "input_ply": "",
+  "input_ply_hash": "",
+  "osm_json": "",
+  "osm_json_hash": "",
+  "position": {
+    "x": 4.0,
+    "y": -3.0,
+    "z": -9.5
+  },
+  "rotation_y_deg": -163.572,
   "scale": 1.0,
-  "fitness": 0.4028255059182894,
-  "rmse": 6.898583797764581,
-  "source_count": 2619,
-  "target_count": 2798,
-  "source": "osm_buildings_to_splat_projection"
+  "fitness": 1.0,
+  "rmse": 0.0,
+  "source_count": 0,
+  "target_count": 0,
+  "source": "manual_unity_alignment",
+  "warnings": [
+    "Manual alignment baked from Unity NavMeshManager transform."
+  ]
 }
